@@ -37,8 +37,8 @@ local LocalPlayer = Players.LocalPlayer
 -- ==========================================
 -- CẤU HÌNH THÔNG SỐ CHUẨN
 -- ==========================================
-local WALK_SPEED = 35         -- Tốc độ chạy đất khi TẮT trạng thái tổng hợp
-local FLY_SPEED = 90          -- Tốc độ chuyển động khi BẬT trạng thái tổng hợp
+local WALK_SPEED = 300         -- Tốc độ chạy đất khi TẮT trạng thái tổng hợp
+local FLY_SPEED = 300          -- Tốc độ chuyển động khi BẬT trạng thái tổng hợp
 local ALL_IN_ONE_KEY = Enum.KeyCode.E -- PHÍM CỐT LÕI "E": BẬT/TẮT TẤT CẢ TÍNH NĂNG
 
 local isActivated = false -- Biến trạng thái tổng hợp
