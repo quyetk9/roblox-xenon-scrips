@@ -5,7 +5,6 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local CollectionService = game:GetService("CollectionService")
 local Lighting = game:GetService("Lighting")
-local CoreGui = game:GetService("StarterGui") -- Used for setting CoreGui state if necessary, but we build in PlayerGui
 
 -- Configuration
 local CONFIG = {
@@ -15,16 +14,16 @@ local CONFIG = {
 	Jump = { Min = 50, Max = 250, Default = 50 },
 	
 	AutoFarm = {
-		HeightAboveEnemy = 10,
-		TweenSpeed = 30, -- Studs per second
-		SearchInterval = 0.5,
+		HeightAboveEnemy = 6,
+		TweenSpeed = 150, -- Increased for maximum efficiency
+		SearchInterval = 0.1, -- Reduced delay between target acquisitions
 		FallbackFolder = workspace:FindFirstChild("Enemies")
 	},
 	
 	AutoLoot = {
-		StoppingDistance = 3,
-		TweenSpeed = 30,
-		SearchInterval = 0.5,
+		StoppingDistance = 1,
+		TweenSpeed = 150,
+		SearchInterval = 0.1,
 		Tags = {"LootChest", "DevilFruit"}
 	},
 	
@@ -41,7 +40,7 @@ local CONFIG = {
 -- Environment
 local LocalPlayer = Players.LocalPlayer
 local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
-local Camera = workspace.CurrentCamera
+local CoreGui = game:GetService("StarterGui")
 
 -- State Management
 local State = {
@@ -61,6 +60,7 @@ local State = {
 	SelectedEnemyType = nil,
 	SelectedLootType = nil,
 	Target = nil,
+	LootTarget = nil,
 	Connections = {},
 	OriginalLighting = {},
 	OriginalMaterials = {},
@@ -68,17 +68,25 @@ local State = {
 }
 
 -- ==========================================
--- INTEGRATION PLACEHOLDERS
+-- INTEGRATION
 -- ==========================================
 
 local function attackTarget(target: Model)
-	-- [BOSS MAN]: Connect your existing combat system here.
-	-- Example: Fire a tool, trigger a ProximityPrompt, or call a local combat module.
+	local char = LocalPlayer.Character
+	if not char or not char:FindFirstChild("Humanoid") then return end
+	
+	-- Generic combat fallback: Equip the first available tool and spam activate it
+	local tool = char:FindFirstChildOfClass("Tool") or LocalPlayer.Backpack:FindFirstChildOfClass("Tool")
+	if tool then
+		char.Humanoid:EquipTool(tool)
+		tool:Activate()
+	end
 end
 
 local function collectLoot(item: Instance)
-	-- [BOSS MAN]: Connect your existing loot collection here.
-	-- Example: Fire a ClickDetector, trigger a ProximityPrompt, or touch the part.
+	-- In standard Roblox, overlapping the character's hitboxes with the item triggers Touch events.
+	-- Since the tween moves the HumanoidRootPart into the item, Touch-based collection happens automatically.
+	-- If your system uses custom Prompts, you must inject that interaction here.
 end
 
 -- ==========================================
@@ -105,7 +113,6 @@ local Screen = create("ScreenGui", {
 	Parent = PlayerGui
 })
 
--- Prevent Duplicate Menus
 for _, gui in ipairs(PlayerGui:GetChildren()) do
 	if gui.Name == "UtilityMenu" and gui ~= Screen then
 		gui:Destroy()
@@ -143,7 +150,6 @@ local Topbar = create("Frame", {
 	})
 })
 
--- Fix Topbar rounded corners bleeding at the bottom
 create("Frame", {
 	Size = UDim2.new(1, 0, 0, 8),
 	Position = UDim2.new(0, 0, 1, -8),
@@ -164,7 +170,6 @@ local ContentScroll = create("ScrollingFrame", {
 	create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8)})
 })
 
--- Drag Logic
 local dragging, dragInput, dragStart, startPos
 Topbar.InputBegan:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -194,7 +199,6 @@ RunService.Heartbeat:Connect(function()
 end)
 
 local function notify(message: string, isError: boolean)
-	-- A simple internal notification system
 	local notif = create("TextLabel", {
 		Size = UDim2.new(1, -20, 0, 30),
 		Position = UDim2.new(0, 10, 0, -40),
@@ -342,7 +346,6 @@ local function findNearest(list: table, targetClass: string): Instance?
 				elseif inst:IsA("BasePart") then
 					pos = inst.Position
 				end
-				-- Very basic validation: Check if it still exists in workspace
 				if inst:IsDescendantOf(workspace) then
 					valid = true
 				end
@@ -385,7 +388,6 @@ local function toggleAutoFarm(enabled: boolean)
 	if enabled then
 		if State.Features.AutoLoot then
 			notify("Auto Loot was disabled to prevent movement conflict.", false)
-			-- UI logic handled in builder
 		end
 		requestNoclip()
 		
@@ -407,15 +409,22 @@ local function toggleAutoFarm(enabled: boolean)
 				if target then
 					local targetPos = target.HumanoidRootPart.Position + Vector3.new(0, CONFIG.AutoFarm.HeightAboveEnemy, 0)
 					local dist = (root.Position - targetPos).Magnitude
-					local timeToTarget = dist / CONFIG.AutoFarm.TweenSpeed
 					
-					cancelActiveMovement()
-					local tInfo = TweenInfo.new(timeToTarget, Enum.EasingStyle.Linear)
-					-- CFrame includes LookAt for facing the target
-					State.ActiveTween = TweenService:Create(root, tInfo, {CFrame = CFrame.new(targetPos, target.HumanoidRootPart.Position)})
-					State.ActiveTween:Play()
+					-- Fix: Only calculate a new tween if the target changed or moved significantly
+					if State.Target ~= target or (State.ActiveTween and State.ActiveTween.PlaybackState ~= Enum.PlaybackState.Playing) or dist > (CONFIG.AutoFarm.HeightAboveEnemy + 2) then
+						State.Target = target
+						cancelActiveMovement()
+						
+						local timeToTarget = math.clamp(dist / CONFIG.AutoFarm.TweenSpeed, 0.1, 5)
+						local tInfo = TweenInfo.new(timeToTarget, Enum.EasingStyle.Linear)
+						State.ActiveTween = TweenService:Create(root, tInfo, {CFrame = CFrame.new(targetPos, target.HumanoidRootPart.Position)})
+						State.ActiveTween:Play()
+					end
 					
 					attackTarget(target)
+				else
+					State.Target = nil
+					cancelActiveMovement()
 				end
 			end
 		end)
@@ -424,6 +433,7 @@ local function toggleAutoFarm(enabled: boolean)
 			task.cancel(State.Connections.AutoFarm)
 			State.Connections.AutoFarm = nil
 		end
+		State.Target = nil
 		releaseNoclip()
 		cancelActiveMovement()
 	end
@@ -456,14 +466,23 @@ local function toggleAutoLoot(enabled: boolean)
 					local dist = (root.Position - pos).Magnitude
 					
 					if dist > CONFIG.AutoLoot.StoppingDistance then
-						local timeToTarget = dist / CONFIG.AutoLoot.TweenSpeed
-						cancelActiveMovement()
-						local tInfo = TweenInfo.new(timeToTarget, Enum.EasingStyle.Linear)
-						State.ActiveTween = TweenService:Create(root, tInfo, {CFrame = CFrame.new(pos)})
-						State.ActiveTween:Play()
+						-- Fix: Prevent tween stutter
+						if State.LootTarget ~= item or (State.ActiveTween and State.ActiveTween.PlaybackState ~= Enum.PlaybackState.Playing) then
+							State.LootTarget = item
+							cancelActiveMovement()
+							
+							local timeToTarget = math.clamp(dist / CONFIG.AutoLoot.TweenSpeed, 0.1, 5)
+							local tInfo = TweenInfo.new(timeToTarget, Enum.EasingStyle.Linear)
+							State.ActiveTween = TweenService:Create(root, tInfo, {CFrame = CFrame.new(pos)})
+							State.ActiveTween:Play()
+						end
 					else
+						State.LootTarget = nil
+						cancelActiveMovement()
 						collectLoot(item)
 					end
+				else
+					State.LootTarget = nil
 				end
 			end
 		end)
@@ -472,6 +491,7 @@ local function toggleAutoLoot(enabled: boolean)
 			task.cancel(State.Connections.AutoLoot)
 			State.Connections.AutoLoot = nil
 		end
+		State.LootTarget = nil
 		releaseNoclip()
 		cancelActiveMovement()
 	end
@@ -527,7 +547,6 @@ local function toggleESP(enabled: boolean)
 			p.CharacterAdded:Connect(function() task.wait(1) buildESP(p) end)
 		end)
 		State.Connections.ESPChar = workspace.DescendantAdded:Connect(function(desc)
-			-- Rebuild on character load
 			local p = Players:GetPlayerFromCharacter(desc)
 			if p and p ~= LocalPlayer then task.wait(1) buildESP(p) end
 		end)
@@ -542,9 +561,7 @@ local function toggleESP(enabled: boolean)
 	end
 end
 
--- Base Loop Management
 RunService.Stepped:Connect(function()
-	-- Noclip Management
 	if State.Features.Noclip or State.NoclipRequests > 0 then
 		local char = LocalPlayer.Character
 		if char then
@@ -556,7 +573,6 @@ RunService.Stepped:Connect(function()
 		end
 	end
 	
-	-- ESP Distance Update
 	if State.Features.ESP then
 		local root = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart")
 		if root then
@@ -577,7 +593,6 @@ end)
 -- ==========================================
 -- UI BUILDER LOGIC
 -- ==========================================
--- Compact UI Components
 
 local function createToggle(name: string, callback)
 	local frame = create("Frame", {Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Parent = ContentScroll})
@@ -599,7 +614,7 @@ local function createSlider(name: string, min: number, max: number, default: num
 	local frame = create("Frame", {Size = UDim2.new(1, 0, 0, 45), BackgroundTransparency = 1, Parent = ContentScroll})
 	local title = create("TextLabel", {Size = UDim2.new(1, -50, 0, 20), BackgroundTransparency = 1, Text = name .. ": " .. default, TextColor3 = Color3.new(1,1,1), Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, Parent = frame})
 	local track = create("Frame", {Size = UDim2.new(1, 0, 0, 6), Position = UDim2.new(0, 0, 0, 30), BackgroundColor3 = Color3.fromRGB(60, 60, 60), Parent = frame}, {create("UICorner", {CornerRadius = UDim.new(1, 0)})})
-	local fill = create("Frame", {Size = UDim2.new((default-min)/(max-min), 0, 1, 0), BackgroundColor3 = Color3.fromRGB(100, 150, 255), Parent = track}, {create("UICorner", {CornerRadius = UDim.new(1, 0)})})
+	local fill = create("Frame", {Size = UDim2.new((default-min)/(max-min), 0, 1, 0), BackgroundColor3 = Color3.fromRGB(100, 150, 2
 	local input = create("TextBox", {Size = UDim2.new(0, 40, 0, 20), Position = UDim2.new(1, -40, 0, 0), BackgroundColor3 = Color3.fromRGB(40,40,45), Text = tostring(default), TextColor3 = Color3.new(1,1,1), Font = Enum.Font.Gotham, TextSize = 12, Parent = frame}, {create("UICorner", {CornerRadius = UDim.new(0, 4)})})
 	
 	local function update(val)
@@ -638,7 +653,6 @@ local function createDropdown(name: string, itemsFn, callback)
 	local btn = create("TextButton", {Size = UDim2.new(1, 0, 0, 25), Position = UDim2.new(0, 0, 0, 25), BackgroundColor3 = Color3.fromRGB(50,50,55), Text = "Select...", TextColor3 = Color3.new(1,1,1), Font = Enum.Font.Gotham, TextSize = 12, Parent = frame}, {create("UICorner", {CornerRadius = UDim.new(0, 4)})})
 	
 	btn.MouseButton1Click:Connect(function()
-		-- Clear old items
 		for _, child in ipairs(Screen:GetChildren()) do if child.Name == "DropdownList" then child:Destroy() end end
 		
 		local items = itemsFn()
