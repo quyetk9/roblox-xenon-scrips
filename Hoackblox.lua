@@ -3,9 +3,8 @@ local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
-local CollectionService = game:GetService("CollectionService")
-local VirtualUser = game:GetService("VirtualUser")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualUser = game:GetService("VirtualUser")
 
 -- Initialization Barrier
 if not game:IsLoaded() then game.Loaded:Wait() end
@@ -13,12 +12,27 @@ if not game:IsLoaded() then game.Loaded:Wait() end
 -- Configuration
 local CONFIG = {
 	MenuToggleKey = Enum.KeyCode.RightControl,
+	IdleTimeout = 4, 
 	AutoFarm = {
 		Distance = 7,
 		TweenSpeed = 150,
 		SearchInterval = 0.1,
-		ClickDelay = 0.05 -- Hyper-fast click rate
+		ClickDelay = 0.05
 	}
+}
+
+-- Target-Based Quest Database 
+local EnemyToQuest = {
+	["Bandit"] = {Quest = "BanditQuest1", Id = 1},
+	["Monkey"] = {Quest = "JungleQuest", Id = 1},
+	["Gorilla"] = {Quest = "JungleQuest", Id = 2},
+	["Pirate"] = {Quest = "BuggyQuest1", Id = 1},
+	["Brute"] = {Quest = "BuggyQuest1", Id = 2},
+	["Desert Bandit"] = {Quest = "DesertQuest", Id = 1},
+	["Desert Officer"] = {Quest = "DesertQuest", Id = 2},
+	["Snow Bandit"] = {Quest = "SnowQuest", Id = 1},
+	["Snowman"] = {Quest = "SnowQuest", Id = 2},
+	["Chief Petty Officer"] = {Quest = "MarineQuest2", Id = 1}
 }
 
 local LocalPlayer = Players.LocalPlayer
@@ -30,23 +44,186 @@ local State = {
 	Features = {
 		AutoFarm = false,
 		AutoQuest = false,
+		AutoClick = false,
 		AntiAFK = false,
 		Noclip = false
 	},
 	FarmPosition = "Above",
+	SelectedWeaponType = "Any Tool",
 	NoclipRequests = 0,
 	ActiveTween = nil,
 	SelectedEnemyType = nil,
 	Target = nil,
-	ClickerActive = false,
 	QuestActive = false
 }
+
+-- ==========================================
+-- UNIVERSAL SCANNING & TARGETING
+-- ==========================================
+
+local function getEnemyFolders(): table
+	local folders = {}
+	local commonNames = {"Enemies", "NPCs", "Mobs", "Spawns", "MobSpawns"}
+	for _, name in ipairs(commonNames) do
+		local folder = workspace:FindFirstChild(name)
+		if folder then table.insert(folders, folder) end
+	end
+	if #folders == 0 then table.insert(folders, workspace) end
+	return folders
+end
+
+local function getLiveEnemyNames(): table
+	local uniqueNames = {}
+	for _, folder in ipairs(getEnemyFolders()) do
+		for _, obj in ipairs(folder:GetChildren()) do
+			if obj:IsA("Model") and obj:FindFirstChild("Humanoid") then
+				if not table.find(uniqueNames, obj.Name) then
+					table.insert(uniqueNames, obj.Name)
+				end
+			end
+		end
+	end
+	return uniqueNames
+end
+
+local function findNearest(targetName: string): Instance?
+	local char = LocalPlayer.Character
+	if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
+	local root = char.HumanoidRootPart
+	
+	local closestDist = math.huge
+	local closestInst = nil
+	
+	for _, folder in ipairs(getEnemyFolders()) do
+		for _, inst in ipairs(folder:GetChildren()) do
+			if inst:IsA("Model") and inst.Name == targetName and inst:FindFirstChild("HumanoidRootPart") then
+				local hum = inst:FindFirstChild("Humanoid")
+				if hum and hum.Health > 0 then
+					local dist = (inst.HumanoidRootPart.Position - root.Position).Magnitude
+					if dist < closestDist then
+						closestDist = dist
+						closestInst = inst
+					end
+				end
+			end
+		end
+	end
+	return closestInst
+end
+
+local function isNearMonster(radius: number): boolean
+	local char = LocalPlayer.Character
+	if not char or not char:FindFirstChild("HumanoidRootPart") then return false end
+	local root = char.HumanoidRootPart
+	
+	for _, folder in ipairs(getEnemyFolders()) do
+		for _, inst in ipairs(folder:GetChildren()) do
+			if inst:IsA("Model") and inst:FindFirstChild("HumanoidRootPart") then
+				local hum = inst:FindFirstChild("Humanoid")
+				if hum and hum.Health > 0 then
+					local dist = (inst.HumanoidRootPart.Position - root.Position).Magnitude
+					if dist <= radius then
+						return true
+					end
+				end
+			end
+		end
+	end
+	return false
+end
+
+-- ==========================================
+-- WEAPON AUTO-EQUIPMENT LOGIC
+-- ==========================================
+
+local function equipSelectedWeapon()
+	local char = LocalPlayer.Character
+	if not char then return nil end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	if not hum then return nil end
+	
+	-- Check if a tool is already equipped
+	local currentTool = char:FindFirstChildOfClass("Tool")
+	if currentTool then return currentTool end
+	
+	-- Scan backpack for selected weapon type
+	local backpack = LocalPlayer:FindFirstChildOfClass("Backpack")
+	if not backpack then return nil end
+	
+	for _, tool in ipairs(backpack:GetChildren()) do
+		if tool:IsA("Tool") then
+			local toolTip = tool:FindFirstChild("ToolTip") and tool.ToolTip.Value or ""
+			local name = tool.Name:lower()
+			local matches = false
+			
+			if State.SelectedWeaponType == "Any Tool" then
+				matches = true
+			elseif State.SelectedWeaponType == "Melee" and (toolTip == "Melee" or name:find("combat") or name:find("vô tân binh") or name:find("style") or name:find("black leg")) then
+				matches = true
+			elseif State.SelectedWeaponType == "Sword" and (toolTip == "Sword" or name:find("katana") or name:find("sword") or name:find("blade") or name:find("cutlass")) then
+				matches = true
+			elseif State.SelectedWeaponType == "Blox Fruit" and (toolTip == "Blox Fruit" or name:find("fruit")) then
+				matches = true
+			elseif State.SelectedWeaponType == "Gun" and (toolTip == "Gun" or name:find("gun") or name:find("slingshot") or name:find("cannon")) then
+				matches = true
+			end
+			
+			if matches then
+				hum:EquipTool(tool)
+				return tool
+			end
+		end
+	end
+	
+	-- Fallback to first available tool in backpack
+	local fallback = backpack:FindFirstChildOfClass("Tool")
+	if fallback then
+		hum:EquipTool(fallback)
+		return fallback
+	end
+	
+	return nil
+end
+
+local function autoEquipAndHaki()
+	equipSelectedWeapon()
+	
+	local commF = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("CommF_")
+	if commF then
+		pcall(function() commF:InvokeServer("Buso") end)
+	end
+end
+
+-- Pure Native Tool Activation (Air Swings)
+local function executeClick()
+	local char = LocalPlayer.Character
+	if char then
+		local tool = char:FindFirstChildOfClass("Tool")
+		if tool then 
+			tool:Activate() 
+		end
+	end
+end
+
+-- Standalone Auto Clicker
+local function toggleStandaloneClicker(enabled: boolean)
+	if enabled then
+		task.spawn(function()
+			while State.Features.AutoClick do
+				if isNearMonster(45) then -- 45-stud detection radius
+					equipSelectedWeapon()
+					executeClick()
+				end
+				task.wait(CONFIG.AutoFarm.ClickDelay)
+			end
+		end)
+	end
+end
 
 -- ==========================================
 -- ADVANCED COMBAT & QUEST LOGIC
 -- ==========================================
 
--- Anti-AFK
 LocalPlayer.Idled:Connect(function()
 	if State.Features.AntiAFK then
 		VirtualUser:CaptureController()
@@ -54,74 +231,20 @@ LocalPlayer.Idled:Connect(function()
 	end
 end)
 
--- Continuous Combat Clicker
-local function startClicker()
-	if State.ClickerActive then return end
-	State.ClickerActive = true
-	
-	task.spawn(function()
-		while State.Features.AutoFarm and State.Target do
-			local char = LocalPlayer.Character
-			if char then
-				-- 1. Force Equip Tool
-				local tool = char:FindFirstChildOfClass("Tool") or LocalPlayer.Backpack:FindFirstChildOfClass("Tool")
-				if tool then
-					if tool.Parent ~= char then
-						local hum = char:FindFirstChild("Humanoid")
-						if hum then hum:EquipTool(tool) end
-					end
-					-- 2. Standard Activation
-					tool:Activate()
-				end
-				
-				-- 3. Hardware Click Simulation (Bypasses custom combat remotes)
-				pcall(function()
-					VirtualUser:CaptureController()
-					VirtualUser:ClickButton1(Vector2.new(0, 0))
-				end)
-				
-				-- 4. Executor Level Click (If supported by your injector)
-				if mouse1click then pcall(mouse1click) end
-			end
-			task.wait(CONFIG.AutoFarm.ClickDelay)
-		end
-		State.ClickerActive = false
-	end)
-end
-
--- Level Detection (Adapts to common stats folders)
-local function getPlayerLevel()
-	local data = LocalPlayer:FindFirstChild("Data")
-	if data and data:FindFirstChild("Level") then return data.Level.Value end
-	
-	local stats = LocalPlayer:FindFirstChild("leaderstats")
-	if stats and stats:FindFirstChild("Level") then return stats.Level.Value end
-	
-	return 1
-end
-
--- Auto Quest Handler
 local function handleAutoQuest()
 	if State.QuestActive or not State.Features.AutoQuest then return end
 	State.QuestActive = true
 	
 	task.spawn(function()
 		while State.Features.AutoQuest do
-			local level = getPlayerLevel()
-			
-			-- Example standard Quest Remote injection (Common in games like Blox Fruits)
 			local commF = ReplicatedStorage:FindFirstChild("Remotes") and ReplicatedStorage.Remotes:FindFirstChild("CommF_")
-			if commF then
-				-- This is a generic blueprint. The exact strings depend on the game's specific quest database.
-				-- For Level 29 (Gorilla/Jungle), it typically looks like this:
-				if level >= 20 and level < 30 then
-					pcall(function()
-						commF:InvokeServer("StartQuest", "JungleQuest", 2) -- Gorilla Quest
-					end)
+			if commF and State.SelectedEnemyType then
+				local questData = EnemyToQuest[State.SelectedEnemyType]
+				if questData then
+					pcall(function() commF:InvokeServer("StartQuest", questData.Quest, questData.Id) end)
 				end
 			end
-			
-			task.wait(5) -- Check for new quests every 5 seconds
+			task.wait(5) 
 		end
 		State.QuestActive = false
 	end)
@@ -143,33 +266,9 @@ end
 -- FARMING LOOP
 -- ==========================================
 
-local function findNearest(list: table): Instance?
-	local char = LocalPlayer.Character
-	if not char or not char:FindFirstChild("HumanoidRootPart") then return nil end
-	local root = char.HumanoidRootPart
-	
-	local closestDist = math.huge
-	local closestInst = nil
-	
-	for _, inst in ipairs(list) do
-		if inst:IsA("Model") and inst.Name == State.SelectedEnemyType and inst:FindFirstChild("HumanoidRootPart") then
-			local hum = inst:FindFirstChild("Humanoid")
-			if hum and hum.Health > 0 then
-				local dist = (inst.HumanoidRootPart.Position - root.Position).Magnitude
-				if dist < closestDist then
-					closestDist = dist
-					closestInst = inst
-				end
-			end
-		end
-	end
-	return closestInst
-end
-
 local function toggleAutoFarm(enabled: boolean)
 	if enabled then
 		State.NoclipRequests += 1
-		
 		task.spawn(function()
 			while State.Features.AutoFarm do
 				task.wait(CONFIG.AutoFarm.SearchInterval)
@@ -179,10 +278,7 @@ local function toggleAutoFarm(enabled: boolean)
 				local root = char.HumanoidRootPart
 				
 				if not State.SelectedEnemyType then continue end
-				
-				-- Automatically pull active enemies from workspace
-				local enemies = workspace.Enemies:GetChildren() 
-				local target = findNearest(enemies)
+				local target = findNearest(State.SelectedEnemyType)
 				
 				if target then
 					local targetRoot = target.HumanoidRootPart
@@ -196,7 +292,6 @@ local function toggleAutoFarm(enabled: boolean)
 					if State.Target ~= target or (State.ActiveTween and State.ActiveTween.PlaybackState ~= Enum.PlaybackState.Playing) or dist > (CONFIG.AutoFarm.Distance + 2) then
 						State.Target = target
 						cancelActiveMovement()
-						
 						local timeToTarget = math.clamp(dist / CONFIG.AutoFarm.TweenSpeed, 0.1, 5)
 						State.ActiveTween = TweenService:Create(root, TweenInfo.new(timeToTarget, Enum.EasingStyle.Linear), {CFrame = desiredCFrame})
 						State.ActiveTween:Play()
@@ -204,8 +299,7 @@ local function toggleAutoFarm(enabled: boolean)
 						root.CFrame = desiredCFrame
 					end
 					
-					-- Fire the continuous clicker
-					startClicker()
+					autoEquipAndHaki()
 				else
 					State.Target = nil
 					cancelActiveMovement()
@@ -224,16 +318,14 @@ RunService.Stepped:Connect(function()
 		local char = LocalPlayer.Character
 		if char then
 			for _, part in ipairs(char:GetDescendants()) do
-				if part:IsA("BasePart") and part.CanCollide then
-					part.CanCollide = false
-				end
+				if part:IsA("BasePart") and part.CanCollide then part.CanCollide = false end
 			end
 		end
 	end
 end)
 
 -- ==========================================
--- UI FACTORY
+-- UI FACTORY & IDLE HIDING LOGIC
 -- ==========================================
 
 local function create(className: string, properties: table, children: table?): Instance
@@ -249,12 +341,42 @@ end
 
 local Screen = create("ScreenGui", {Name = "UtilityMenu", ResetOnSpawn = false, IgnoreGuiInset = true, Parent = PlayerGui})
 
-local MainFrame = create("Frame", {
-	Size = UDim2.new(0, 300, 0, 450), Position = UDim2.new(0.5, -150, 0.5, -225),
-	BackgroundColor3 = Color3.fromRGB(30, 30, 35), BorderSizePixel = 0, Active = true, Parent = Screen
-}, {
-	create("UICorner", {CornerRadius = UDim.new(0, 8)})
+local MasterGroup = create("CanvasGroup", {
+	Size = UDim2.new(1, 0, 1, 0), BackgroundTransparency = 1, GroupTransparency = 0, Parent = Screen
 })
+
+local ToggleButton = create("TextButton", {
+	Size = UDim2.new(0, 45, 0, 45), Position = UDim2.new(0, 15, 0.5, -22),
+	BackgroundColor3 = Color3.fromRGB(30, 30, 35), Text = "☰",
+	TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold, TextSize = 24,
+	Active = true, Draggable = true, Parent = MasterGroup
+}, {
+	create("UICorner", {CornerRadius = UDim.new(0, 8)}),
+	create("UIStroke", {Color = Color3.fromRGB(60, 60, 65), Thickness = 1})
+})
+
+local MainFrame = create("Frame", {
+	Size = UDim2.new(0, 300, 0, 480), Position = UDim2.new(0.5, -150, 0.5, -240),
+	BackgroundColor3 = Color3.fromRGB(30, 30, 35), BorderSizePixel = 0,
+	Active = true, Visible = State.MenuOpen, Parent = MasterGroup
+}, {
+	create("UICorner", {CornerRadius = UDim.new(0, 8)}),
+	create("UIStroke", {Color = Color3.fromRGB(60, 60, 65), Thickness = 1})
+})
+
+local Topbar = create("Frame", {
+	Size = UDim2.new(1, 0, 0, 30), BackgroundColor3 = Color3.fromRGB(40, 40, 45), Parent = MainFrame
+}, {
+	create("UICorner", {CornerRadius = UDim.new(0, 8)}),
+	create("TextLabel", {
+		Size = UDim2.new(1, -60, 1, 0), Position = UDim2.new(0, 10, 0, 0),
+		BackgroundTransparency = 1, Text = "Utility Menu v7",
+		TextColor3 = Color3.new(1, 1, 1), Font = Enum.Font.GothamBold,
+		TextSize = 14, TextXAlignment = Enum.TextXAlignment.Left
+	})
+})
+
+create("Frame", {Size = UDim2.new(1, 0, 0, 8), Position = UDim2.new(0, 0, 1, -8), BackgroundColor3 = Color3.fromRGB(40, 40, 45), BorderSizePixel = 0, Parent = Topbar})
 
 local ContentScroll = create("ScrollingFrame", {
 	Size = UDim2.new(1, -20, 1, -40), Position = UDim2.new(0, 10, 0, 35),
@@ -263,6 +385,66 @@ local ContentScroll = create("ScrollingFrame", {
 }, {
 	create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder, Padding = UDim.new(0, 8)})
 })
+
+local dragging, dragInput, dragStart, startPos
+Topbar.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+		dragging = true; dragStart = input.Position; startPos = MainFrame.Position
+		input.Changed:Connect(function() if input.UserInputState == Enum.UserInputState.End then dragging = false end end)
+	end
+end)
+Topbar.InputChanged:Connect(function(input) if input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch then dragInput = input end end)
+RunService.Heartbeat:Connect(function()
+	if dragging and dragInput then
+		local delta = dragInput.Position - dragStart
+		MainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+	end
+end)
+
+ToggleButton.MouseButton1Click:Connect(function()
+	State.MenuOpen = not State.MenuOpen
+	MainFrame.Visible = State.MenuOpen
+end)
+
+UserInputService.InputBegan:Connect(function(input, processed)
+	if processed then return end
+	if input.KeyCode == CONFIG.MenuToggleKey then
+		State.MenuOpen = not State.MenuOpen
+		MainFrame.Visible = State.MenuOpen
+	end
+end)
+
+local lastInteraction = tick()
+local uiIsVisible = true
+
+local function wakeUpUI()
+	lastInteraction = tick()
+	if not uiIsVisible then
+		uiIsVisible = true
+		MasterGroup.Visible = true
+		TweenService:Create(MasterGroup, TweenInfo.new(0.3), {GroupTransparency = 0}):Play()
+	end
+end
+
+UserInputService.InputBegan:Connect(wakeUpUI)
+UserInputService.InputChanged:Connect(wakeUpUI)
+
+task.spawn(function()
+	while true do
+		task.wait(0.5)
+		if uiIsVisible and (tick() - lastInteraction > CONFIG.IdleTimeout) then
+			uiIsVisible = false
+			local fadeOut = TweenService:Create(MasterGroup, TweenInfo.new(0.5), {GroupTransparency = 1})
+			fadeOut:Play()
+			fadeOut.Completed:Wait()
+			if not uiIsVisible then MasterGroup.Visible = false end 
+		end
+	end
+end)
+
+-- ==========================================
+-- POPULATE UI
+-- ==========================================
 
 local function createToggle(name: string, callback)
 	local frame = create("Frame", {Size = UDim2.new(1, 0, 0, 30), BackgroundTransparency = 1, Parent = ContentScroll})
@@ -279,14 +461,18 @@ local function createToggle(name: string, callback)
 	end)
 end
 
-local function createDropdown(name: string, items, callback)
+local function createDynamicDropdown(name: string, getItemsFunc, callback)
 	local frame = create("Frame", {Size = UDim2.new(1, 0, 0, 50), BackgroundTransparency = 1, Parent = ContentScroll})
 	create("TextLabel", {Size = UDim2.new(1, 0, 0, 20), BackgroundTransparency = 1, Text = name, TextColor3 = Color3.new(1,1,1), Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, Parent = frame})
-	local btn = create("TextButton", {Size = UDim2.new(1, 0, 0, 25), Position = UDim2.new(0, 0, 0, 25), BackgroundColor3 = Color3.fromRGB(50,50,55), Text = "Select...", TextColor3 = Color3.new(1,1,1), Font = Enum.Font.Gotham, TextSize = 12, Parent = frame}, {create("UICorner", {CornerRadius = UDim.new(0, 4)})})
+	local btn = create("TextButton", {Size = UDim2.new(1, 0, 0, 25), Position = UDim2.new(0, 0, 0, 25), BackgroundColor3 = Color3.fromRGB(50,50,55), Text = "Select Option...", TextColor3 = Color3.new(1,1,1), Font = Enum.Font.Gotham, TextSize = 12, Parent = frame}, {create("UICorner", {CornerRadius = UDim.new(0, 4)})})
 	
 	btn.MouseButton1Click:Connect(function()
-		for _, child in ipairs(Screen:GetChildren()) do if child.Name == "DropdownList" then child:Destroy() end end
-		local list = create("ScrollingFrame", {Name = "DropdownList", Size = UDim2.new(0, 200, 0, 100), Position = UDim2.new(0, btn.AbsolutePosition.X, 0, btn.AbsolutePosition.Y + 30), BackgroundColor3 = Color3.fromRGB(40,40,45), Parent = Screen}, {create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder})})
+		for _, child in ipairs(MasterGroup:GetChildren()) do if child.Name == "DropdownList" then child:Destroy() end end
+		
+		local items = type(getItemsFunc) == "function" and getItemsFunc() or getItemsFunc
+		if #items == 0 then btn.Text = "No options found!"; task.wait(1); btn.Text = "Select Option..."; return end
+		
+		local list = create("ScrollingFrame", {Name = "DropdownList", Size = UDim2.new(0, 200, 0, math.min(#items * 25, 150)), Position = UDim2.new(0, btn.AbsolutePosition.X, 0, btn.AbsolutePosition.Y + 30), BackgroundColor3 = Color3.fromRGB(40,40,45), CanvasSize = UDim2.new(0,0,0,#items*25), ScrollBarThickness = 2, Parent = MasterGroup}, {create("UIListLayout", {SortOrder = Enum.SortOrder.LayoutOrder}), create("UICorner", {CornerRadius = UDim.new(0,4)})})
 		for i, n in ipairs(items) do
 			local iBtn = create("TextButton", {Size = UDim2.new(1, 0, 0, 25), BackgroundTransparency = 1, Text = n, TextColor3 = Color3.new(1,1,1), Font = Enum.Font.Gotham, TextSize = 12, LayoutOrder = i, Parent = list})
 			iBtn.MouseButton1Click:Connect(function() btn.Text = n; list:Destroy(); callback(n) end)
@@ -294,10 +480,11 @@ local function createDropdown(name: string, items, callback)
 	end)
 end
 
--- POPULATE UI
+createToggle("Auto Click", toggleStandaloneClicker)
+createDynamicDropdown("Select Weapon", {"Any Tool", "Melee", "Sword", "Blox Fruit", "Gun"}, function(val) State.SelectedWeaponType = val end)
 createToggle("Auto Quest", handleAutoQuest)
 createToggle("Anti AFK", nil)
 createToggle("Noclip", function(val) State.Features.Noclip = val end)
-createDropdown("Select Enemy", {"The Gorilla King", "Gorilla", "Monkey"}, function(val) State.SelectedEnemyType = val end)
-createDropdown("Farm Position", {"Above", "Below", "Behind"}, function(val) State.FarmPosition = val end)
+createDynamicDropdown("Select Enemy", getLiveEnemyNames, function(val) State.SelectedEnemyType = val end)
+createDynamicDropdown("Farm Position", {"Above", "Below", "Behind"}, function(val) State.FarmPosition = val end)
 createToggle("Auto Farm", toggleAutoFarm)
