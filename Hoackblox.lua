@@ -6,6 +6,11 @@ local UserInputService = game:GetService("UserInputService")
 local CollectionService = game:GetService("CollectionService")
 local Lighting = game:GetService("Lighting")
 
+-- Initialization Barrier: Prevent race conditions by waiting for the game to stream in
+if not game:IsLoaded() then
+	game.Loaded:Wait()
+end
+
 -- Configuration
 local CONFIG = {
 	MenuToggleKey = Enum.KeyCode.RightControl,
@@ -15,9 +20,9 @@ local CONFIG = {
 	
 	AutoFarm = {
 		HeightAboveEnemy = 6,
-		TweenSpeed = 150, -- Increased for maximum efficiency
-		SearchInterval = 0.1, -- Reduced delay between target acquisitions
-		FallbackFolder = workspace:FindFirstChild("Enemies")
+		TweenSpeed = 150,
+		SearchInterval = 0.1,
+		FallbackFolderName = "Enemies" -- Resolved dynamically to prevent startup nil reference
 	},
 	
 	AutoLoot = {
@@ -39,8 +44,11 @@ local CONFIG = {
 
 -- Environment
 local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
-local CoreGui = game:GetService("StarterGui")
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui", 15)
+
+if not PlayerGui then
+	error("[UtilityMenu] Initialization failed: PlayerGui did not load within the safe timeout.")
+end
 
 -- State Management
 local State = {
@@ -75,7 +83,6 @@ local function attackTarget(target: Model)
 	local char = LocalPlayer.Character
 	if not char or not char:FindFirstChild("Humanoid") then return end
 	
-	-- Generic combat fallback: Equip the first available tool and spam activate it
 	local tool = char:FindFirstChildOfClass("Tool") or LocalPlayer.Backpack:FindFirstChildOfClass("Tool")
 	if tool then
 		char.Humanoid:EquipTool(tool)
@@ -84,9 +91,8 @@ local function attackTarget(target: Model)
 end
 
 local function collectLoot(item: Instance)
-	-- In standard Roblox, overlapping the character's hitboxes with the item triggers Touch events.
-	-- Since the tween moves the HumanoidRootPart into the item, Touch-based collection happens automatically.
-	-- If your system uses custom Prompts, you must inject that interaction here.
+	-- Built-in physical overlap handles standard Touch events.
+	-- Add custom interaction logic here if required.
 end
 
 -- ==========================================
@@ -366,8 +372,10 @@ end
 
 local function getEnemyList(): table
 	local enemies = CollectionService:GetTagged("FarmableEnemy")
-	if #enemies == 0 and CONFIG.AutoFarm.FallbackFolder then
-		for _, child in ipairs(CONFIG.AutoFarm.FallbackFolder:GetChildren()) do
+	local fallbackFolder = workspace:FindFirstChild(CONFIG.AutoFarm.FallbackFolderName)
+	
+	if #enemies == 0 and fallbackFolder then
+		for _, child in ipairs(fallbackFolder:GetChildren()) do
 			table.insert(enemies, child)
 		end
 	end
@@ -410,7 +418,6 @@ local function toggleAutoFarm(enabled: boolean)
 					local targetPos = target.HumanoidRootPart.Position + Vector3.new(0, CONFIG.AutoFarm.HeightAboveEnemy, 0)
 					local dist = (root.Position - targetPos).Magnitude
 					
-					-- Fix: Only calculate a new tween if the target changed or moved significantly
 					if State.Target ~= target or (State.ActiveTween and State.ActiveTween.PlaybackState ~= Enum.PlaybackState.Playing) or dist > (CONFIG.AutoFarm.HeightAboveEnemy + 2) then
 						State.Target = target
 						cancelActiveMovement()
@@ -466,7 +473,6 @@ local function toggleAutoLoot(enabled: boolean)
 					local dist = (root.Position - pos).Magnitude
 					
 					if dist > CONFIG.AutoLoot.StoppingDistance then
-						-- Fix: Prevent tween stutter
 						if State.LootTarget ~= item or (State.ActiveTween and State.ActiveTween.PlaybackState ~= Enum.PlaybackState.Playing) then
 							State.LootTarget = item
 							cancelActiveMovement()
@@ -511,7 +517,7 @@ local function buildESP(player: Player)
 	hl.FillColor = color
 	hl.FillTransparency = 0.5
 	hl.OutlineColor = color
-	hl.Parent = CoreGui:FindFirstChild("RobloxGui") or Screen
+	hl.Parent = Screen -- Secured: CoreGui reference removed
 	
 	local bg = Instance.new("BillboardGui")
 	bg.Adornee = char.HumanoidRootPart
@@ -533,7 +539,7 @@ local function buildESP(player: Player)
 	distTxt.Position = UDim2.new(0, 0, 0.5, 0)
 	distTxt.Parent = bg
 	
-	bg.Parent = CoreGui:FindFirstChild("RobloxGui") or Screen
+	bg.Parent = Screen
 	
 	State.ESPObjects[player] = {Highlight = hl, Billboard = bg, DistText = distTxt}
 end
@@ -614,7 +620,7 @@ local function createSlider(name: string, min: number, max: number, default: num
 	local frame = create("Frame", {Size = UDim2.new(1, 0, 0, 45), BackgroundTransparency = 1, Parent = ContentScroll})
 	local title = create("TextLabel", {Size = UDim2.new(1, -50, 0, 20), BackgroundTransparency = 1, Text = name .. ": " .. default, TextColor3 = Color3.new(1,1,1), Font = Enum.Font.Gotham, TextSize = 12, TextXAlignment = Enum.TextXAlignment.Left, Parent = frame})
 	local track = create("Frame", {Size = UDim2.new(1, 0, 0, 6), Position = UDim2.new(0, 0, 0, 30), BackgroundColor3 = Color3.fromRGB(60, 60, 60), Parent = frame}, {create("UICorner", {CornerRadius = UDim.new(1, 0)})})
-	local fill = create("Frame", {Size = UDim2.new((default-min)/(max-min), 0, 1, 0), BackgroundColor3 = Color3.fromRGB(100, 150, 2
+	local fill = create("Frame", {Size = UDim2.new((default-min)/(max-min), 0, 1, 0), BackgroundColor3 = Color3.fromRGB(100, 150, 255), Parent = track}, {create("UICorner", {CornerRadius = UDim.new(1, 0)})})
 	local input = create("TextBox", {Size = UDim2.new(0, 40, 0, 20), Position = UDim2.new(1, -40, 0, 0), BackgroundColor3 = Color3.fromRGB(40,40,45), Text = tostring(default), TextColor3 = Color3.new(1,1,1), Font = Enum.Font.Gotham, TextSize = 12, Parent = frame}, {create("UICorner", {CornerRadius = UDim.new(0, 4)})})
 	
 	local function update(val)
