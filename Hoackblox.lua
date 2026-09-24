@@ -5,6 +5,7 @@ local TweenService = game:GetService("TweenService")
 local UserInputService = game:GetService("UserInputService")
 local CollectionService = game:GetService("CollectionService")
 local Lighting = game:GetService("Lighting")
+local VirtualUser = game:GetService("VirtualUser")
 
 -- Initialization Barrier: Prevent race conditions by waiting for the game to stream in
 if not game:IsLoaded() then
@@ -22,7 +23,7 @@ local CONFIG = {
 		HeightAboveEnemy = 6,
 		TweenSpeed = 150,
 		SearchInterval = 0.1,
-		FallbackFolderName = "Enemies" -- Resolved dynamically to prevent startup nil reference
+		FallbackFolderName = "Enemies"
 	},
 	
 	AutoLoot = {
@@ -76,23 +77,29 @@ local State = {
 }
 
 -- ==========================================
--- INTEGRATION
+-- INTEGRATION (COMBAT & LOOT)
 -- ==========================================
 
 local function attackTarget(target: Model)
 	local char = LocalPlayer.Character
 	if not char or not char:FindFirstChild("Humanoid") then return end
 	
+	-- 1. Standard Tool Activation
 	local tool = char:FindFirstChildOfClass("Tool") or LocalPlayer.Backpack:FindFirstChildOfClass("Tool")
 	if tool then
 		char.Humanoid:EquipTool(tool)
 		tool:Activate()
 	end
+	
+	-- 2. Aggressive Click Simulation (Bypasses custom combat systems that require mouse clicks)
+	pcall(function()
+		VirtualUser:CaptureController()
+		VirtualUser:ClickButton1(Vector2.new(0, 0))
+	end)
 end
 
 local function collectLoot(item: Instance)
 	-- Built-in physical overlap handles standard Touch events.
-	-- Add custom interaction logic here if required.
 end
 
 -- ==========================================
@@ -112,6 +119,13 @@ local function create(className: string, properties: table, children: table?): I
 	return inst
 end
 
+-- Screen Setup
+for _, gui in ipairs(PlayerGui:GetChildren()) do
+	if gui.Name == "UtilityMenu" then
+		gui:Destroy()
+	end
+end
+
 local Screen = create("ScreenGui", {
 	Name = "UtilityMenu",
 	ResetOnSpawn = false,
@@ -119,11 +133,22 @@ local Screen = create("ScreenGui", {
 	Parent = PlayerGui
 })
 
-for _, gui in ipairs(PlayerGui:GetChildren()) do
-	if gui.Name == "UtilityMenu" and gui ~= Screen then
-		gui:Destroy()
-	end
-end
+-- Mobile/Mouse Toggle Icon
+local ToggleButton = create("TextButton", {
+	Size = UDim2.new(0, 45, 0, 45),
+	Position = UDim2.new(0, 15, 0.5, -22),
+	BackgroundColor3 = Color3.fromRGB(30, 30, 35),
+	Text = "☰",
+	TextColor3 = Color3.new(1, 1, 1),
+	Font = Enum.Font.GothamBold,
+	TextSize = 24,
+	Active = true,
+	Draggable = true, -- Allows you to move the icon out of the way
+	Parent = Screen
+}, {
+	create("UICorner", {CornerRadius = UDim.new(0, 8)}),
+	create("UIStroke", {Color = Color3.fromRGB(60, 60, 65), Thickness = 1})
+})
 
 local MainFrame = create("Frame", {
 	Size = UDim2.new(0, 300, 0, 450),
@@ -131,11 +156,17 @@ local MainFrame = create("Frame", {
 	BackgroundColor3 = Color3.fromRGB(30, 30, 35),
 	BorderSizePixel = 0,
 	Active = true,
+	Visible = State.MenuOpen,
 	Parent = Screen
 }, {
 	create("UICorner", {CornerRadius = UDim.new(0, 8)}),
 	create("UIStroke", {Color = Color3.fromRGB(60, 60, 65), Thickness = 1})
 })
+
+ToggleButton.MouseButton1Click:Connect(function()
+	State.MenuOpen = not State.MenuOpen
+	MainFrame.Visible = State.MenuOpen
+end)
 
 local Topbar = create("Frame", {
 	Size = UDim2.new(1, 0, 0, 30),
@@ -418,6 +449,11 @@ local function toggleAutoFarm(enabled: boolean)
 					local targetPos = target.HumanoidRootPart.Position + Vector3.new(0, CONFIG.AutoFarm.HeightAboveEnemy, 0)
 					local dist = (root.Position - targetPos).Magnitude
 					
+					-- Orient character toward target for combat systems that require facing the enemy
+					if dist <= (CONFIG.AutoFarm.HeightAboveEnemy + 3) then
+						root.CFrame = CFrame.lookAt(root.Position, target.HumanoidRootPart.Position)
+					end
+					
 					if State.Target ~= target or (State.ActiveTween and State.ActiveTween.PlaybackState ~= Enum.PlaybackState.Playing) or dist > (CONFIG.AutoFarm.HeightAboveEnemy + 2) then
 						State.Target = target
 						cancelActiveMovement()
@@ -428,6 +464,7 @@ local function toggleAutoFarm(enabled: boolean)
 						State.ActiveTween:Play()
 					end
 					
+					-- Blast them
 					attackTarget(target)
 				else
 					State.Target = nil
@@ -517,7 +554,7 @@ local function buildESP(player: Player)
 	hl.FillColor = color
 	hl.FillTransparency = 0.5
 	hl.OutlineColor = color
-	hl.Parent = Screen -- Secured: CoreGui reference removed
+	hl.Parent = Screen 
 	
 	local bg = Instance.new("BillboardGui")
 	bg.Adornee = char.HumanoidRootPart
@@ -704,7 +741,7 @@ local autoFarmBtn = createToggle("Auto Farm", toggleAutoFarm)
 createDropdown("Select Loot", function() return CONFIG.AutoLoot.Tags end, function(val) State.SelectedLootType = val end)
 local autoLootBtn = createToggle("Auto Loot", toggleAutoLoot)
 
--- Input Handling for Menu Toggle
+-- Input Handling for Keybind Toggle
 UserInputService.InputBegan:Connect(function(input, processed)
 	if processed then return end
 	if input.KeyCode == CONFIG.MenuToggleKey then
