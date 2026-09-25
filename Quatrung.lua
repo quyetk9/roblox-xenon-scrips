@@ -1,8 +1,9 @@
 --!strict
+-- Place in StarterPlayer > StarterPlayerScripts
 
---//====================================================
---// CONFIGURATION
---//====================================================
+--========================================================
+-- CONFIGURATION
+--========================================================
 
 local CONFIG = {
 	MenuToggleKey = Enum.KeyCode.RightShift,
@@ -27,21 +28,21 @@ local CONFIG = {
 
 	AutoFarmDelay = {
 		Min = 0.10,
-		Max = 2,
+		Max = 2.00,
 		Default = 0.35,
 	},
 
+	UIBuildDelay = 0.10,
+	ESPUpdateInterval = 0.25,
 	AntiAFKInterval = 300,
+
+	EggFolderName = "Eggs",
 
 	EggTags = {
 		"TrendingEgg",
 		"SecretEgg",
 		"LegendaryEgg",
 	},
-
-	EggFolderName = "Eggs",
-
-	ESPUpdateInterval = 0.25,
 
 	RarityColors = {
 		TrendingEgg = Color3.fromRGB(80, 200, 255),
@@ -56,9 +57,9 @@ local CONFIG = {
 	},
 }
 
---//====================================================
---// SERVICES
---//====================================================
+--========================================================
+-- SERVICES
+--========================================================
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -66,28 +67,30 @@ local TweenService = game:GetService("TweenService")
 local Lighting = game:GetService("Lighting")
 local CollectionService = game:GetService("CollectionService")
 local UserInputService = game:GetService("UserInputService")
-local VirtualUser = game:GetService("VirtualUser")
 
 local LocalPlayer = Players.LocalPlayer
-local Camera = workspace.CurrentCamera
+local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
 
---//====================================================
---// DUPLICATE PROTECTION
---//====================================================
+-- IMPORTANT:
+-- There is deliberately NO Character access here.
+-- There are deliberately NO Workspace/Lighting scans here.
+-- There are deliberately NO movement/ESP/physics connections here.
+
+--========================================================
+-- DUPLICATE MENU GUARD
+--========================================================
 
 local GUI_NAME = "MrDonEggUtility"
 
-local oldGui = LocalPlayer:WaitForChild("PlayerGui"):FindFirstChild(GUI_NAME)
-if oldGui then
-	oldGui:Destroy()
+if PlayerGui:FindFirstChild(GUI_NAME) then
+	return
 end
 
---//====================================================
---// STATE
---//====================================================
+--========================================================
+-- STATE
+--========================================================
 
 local state = {
-	MenuOpen = true,
 	FixLag = false,
 	FullBright = false,
 	SpeedWalk = false,
@@ -95,8 +98,8 @@ local state = {
 	Fly = false,
 	AutoCatch = false,
 	Noclip = false,
-	PlayerESP = false,
 	EggESP = false,
+	PlayerESP = false,
 	AntiAFK = false,
 
 	WalkSpeed = CONFIG.WalkSpeed.Default,
@@ -104,119 +107,724 @@ local state = {
 	FlySpeed = CONFIG.FlySpeed.Default,
 	AutoFarmDelay = CONFIG.AutoFarmDelay.Default,
 
-	SelectedEggTag = "TrendingEgg",
+	SelectedEggTag = CONFIG.EggTags[1],
 
-	Character = nil :: Model?,
-	Humanoid = nil :: Humanoid?,
-	RootPart = nil :: BasePart?,
+	MovementOwner = "None",
+	MenuVisible = true,
+	Collapsed = false,
 }
 
-local connections: { RBXScriptConnection } = {}
-local tasks: { thread } = {}
-local original = {
-	Lighting = {},
-	Visuals = {},
-	Character = {},
-}
+--========================================================
+-- FEATURE CONNECTION REGISTRIES
+--========================================================
 
-local flyVelocity: BodyVelocity? = nil
-local flyGyro: BodyGyro? = nil
-local noclipOwners: {[string]: boolean} = {}
+local featureConnections: {
+	[string]: {RBXScriptConnection}
+} = {}
 
---//====================================================
---// HELPERS
---//====================================================
+local featureTasks: {
+	[string]: {thread}
+} = {}
 
-local function connect(signal: RBXScriptSignal, fn: (...any) -> ())
-	local connection = signal:Connect(fn)
-	table.insert(connections, connection)
-	return connection
+local function addConnection(
+	feature: string,
+	connection: RBXScriptConnection
+)
+	featureConnections[feature] = featureConnections[feature] or {}
+	table.insert(featureConnections[feature], connection)
 end
 
-local function spawnTask(fn: () -> ())
-	local thread = task.spawn(fn)
-	table.insert(tasks, thread)
-	return thread
+local function disconnectFeature(feature: string)
+	local connections = featureConnections[feature]
+
+	if connections then
+		for _, connection in ipairs(connections) do
+			if connection.Connected then
+				connection:Disconnect()
+			end
+		end
+	end
+
+	featureConnections[feature] = nil
 end
 
-local function notify(message: string, duration: number?)
-	local playerGui = LocalPlayer:FindFirstChildOfClass("PlayerGui")
-	if not playerGui then
-		return
+local function addTask(feature: string, thread: thread)
+	featureTasks[feature] = featureTasks[feature] or {}
+	table.insert(featureTasks[feature], thread)
+end
+
+local function cancelFeatureTasks(feature: string)
+	local tasks = featureTasks[feature]
+
+	if tasks then
+		for _, thread in ipairs(tasks) do
+			if coroutine.status(thread) ~= "dead" then
+				task.cancel(thread)
+			end
+		end
 	end
 
-	local gui = playerGui:FindFirstChild(GUI_NAME)
-	if not gui then
-		return
-	end
+	featureTasks[feature] = nil
+end
 
-	local notification = Instance.new("TextLabel")
-	notification.Size = UDim2.fromOffset(260, 42)
-	notification.Position = UDim2.new(1, -275, 1, -60)
-	notification.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
-	notification.BackgroundTransparency = 0.08
-	notification.TextColor3 = Color3.new(1, 1, 1)
-	notification.Font = Enum.Font.GothamMedium
-	notification.TextSize = 13
-	notification.Text = message
-	notification.Parent = gui
+local function cleanupFeature(feature: string)
+	disconnectFeature(feature)
+	cancelFeatureTasks(feature)
+end
 
-	Instance.new("UICorner", notification).CornerRadius = UDim.new(0, 8)
+--========================================================
+-- UI
+--========================================================
 
-	TweenService:Create(
-		notification,
-		TweenInfo.new(0.2),
-		{Position = UDim2.new(1, -275, 1, -115)}
-	):Play()
+local gui = Instance.new("ScreenGui")
+gui.Name = GUI_NAME
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = PlayerGui
 
-	task.delay(duration or 2, function()
-		if notification.Parent then
-			local tween = TweenService:Create(
-				notification,
-				TweenInfo.new(0.2),
-				{TextTransparency = 1, BackgroundTransparency = 1}
-			)
-			tween:Play()
-			tween.Completed:Wait()
-			notification:Destroy()
+local main = Instance.new("Frame")
+main.Name = "Main"
+main.Size = UDim2.fromOffset(360, 430)
+main.Position = UDim2.new(0, 24, 0.5, -215)
+main.BackgroundColor3 = Color3.fromRGB(22, 23, 28)
+main.BorderSizePixel = 0
+main.Parent = gui
+
+Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
+
+local title = Instance.new("TextLabel")
+title.Size = UDim2.new(1, -105, 0, 42)
+title.Position = UDim2.fromOffset(15, 0)
+title.BackgroundTransparency = 1
+title.Text = "MrDon • Egg Utility"
+title.TextColor3 = Color3.new(1, 1, 1)
+title.TextXAlignment = Enum.TextXAlignment.Left
+title.Font = Enum.Font.GothamBold
+title.TextSize = 15
+title.Parent = main
+
+local status = Instance.new("TextLabel")
+status.Size = UDim2.new(1, -30, 0, 26)
+status.Position = UDim2.fromOffset(15, 39)
+status.BackgroundTransparency = 1
+status.Text = "Auto Catch: OFF   •   Anti-AFK: OFF"
+status.TextColor3 = Color3.fromRGB(170, 175, 185)
+status.TextXAlignment = Enum.TextXAlignment.Left
+status.Font = Enum.Font.Gotham
+status.TextSize = 10
+status.Parent = main
+
+local closeButton = Instance.new("TextButton")
+closeButton.Size = UDim2.fromOffset(30, 30)
+closeButton.Position = UDim2.new(1, -38, 0, 6)
+closeButton.Text = "×"
+closeButton.TextSize = 21
+closeButton.TextColor3 = Color3.new(1, 1, 1)
+closeButton.BackgroundTransparency = 1
+closeButton.Parent = main
+
+local minimizeButton = Instance.new("TextButton")
+minimizeButton.Size = UDim2.fromOffset(30, 30)
+minimizeButton.Position = UDim2.new(1, -72, 0, 6)
+minimizeButton.Text = "—"
+minimizeButton.TextSize = 18
+minimizeButton.TextColor3 = Color3.new(1, 1, 1)
+minimizeButton.BackgroundTransparency = 1
+minimizeButton.Parent = main
+
+local content = Instance.new("ScrollingFrame")
+content.Name = "Content"
+content.Size = UDim2.new(1, -20, 1, -77)
+content.Position = UDim2.fromOffset(10, 72)
+content.BackgroundTransparency = 1
+content.BorderSizePixel = 0
+content.ScrollBarThickness = 4
+content.AutomaticCanvasSize = Enum.AutomaticSize.Y
+content.CanvasSize = UDim2.new()
+content.Parent = main
+
+local list = Instance.new("UIListLayout")
+list.Padding = UDim.new(0, 6)
+list.Parent = content
+
+local function uiPause()
+	task.wait(CONFIG.UIBuildDelay)
+end
+
+local function notify(message: string)
+	local label = Instance.new("TextLabel")
+
+	label.Size = UDim2.fromOffset(255, 38)
+	label.Position = UDim2.new(1, -270, 1, -60)
+	label.BackgroundColor3 = Color3.fromRGB(20, 20, 24)
+	label.BackgroundTransparency = 0.08
+	label.TextColor3 = Color3.new(1, 1, 1)
+	label.Font = Enum.Font.GothamMedium
+	label.TextSize = 11
+	label.Text = message
+	label.Parent = gui
+
+	Instance.new("UICorner", label).CornerRadius = UDim.new(0, 8)
+
+	task.delay(1.8, function()
+		if label.Parent then
+			label:Destroy()
 		end
 	end)
 end
 
-local function getCharacter()
+local function updateStatus()
+	local antiAfkText = state.AntiAFK and "ON" or "OFF"
+	local autoText = state.AutoCatch and "ON" or "OFF"
+
+	status.Text = string.format(
+		"Auto Catch: %s   •   Anti-AFK: %s",
+		autoText,
+		antiAfkText
+	)
+end
+
+--========================================================
+-- CHARACTER ACCESS — ONLY CALLED BY ACTIVE FEATURES
+--========================================================
+
+local function getCharacterObjects()
 	local character = LocalPlayer.Character
+
 	if not character then
-		return nil
+		return nil, nil, nil
 	end
 
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
 	local root = character:FindFirstChild("HumanoidRootPart")
 
 	if not humanoid or not root then
-		return nil
+		return character, nil, nil
 	end
 
 	return character, humanoid, root
 end
 
-local function refreshCharacter()
-	local character, humanoid, root = getCharacter()
+local function featureNeedsCharacter()
+	return state.SpeedWalk
+		or state.HighJump
+		or state.Fly
+		or state.AutoCatch
+		or state.Noclip
+end
 
-	state.Character = character
-	state.Humanoid = humanoid
-	state.RootPart = root
+local function bindCharacterLifecycle()
+	if featureConnections.CharacterLifecycle then
+		return
+	end
 
-	if humanoid then
-		original.Character.WalkSpeed = humanoid.WalkSpeed
-		original.Character.UseJumpPower = humanoid.UseJumpPower
+	addConnection(
+		"CharacterLifecycle",
+		LocalPlayer.CharacterAdded:Connect(function()
+			task.wait(0.15)
 
-		if humanoid.UseJumpPower then
-			original.Character.JumpPower = humanoid.JumpPower
-		else
-			original.Character.JumpHeight = humanoid.JumpHeight
+			if state.SpeedWalk then
+				applyWalkSpeed()
+			end
+
+			if state.HighJump then
+				applyJump()
+			end
+
+			if state.Fly then
+				enableFlyPhysics()
+			end
+
+			if state.Noclip then
+				updateNoclipController()
+			end
+		end)
+	)
+end
+
+local function unbindCharacterLifecycle()
+	if featureNeedsCharacter() then
+		return
+	end
+
+	cleanupFeature("CharacterLifecycle")
+end
+
+--========================================================
+-- MOVEMENT OWNERSHIP
+--========================================================
+
+local function stopAutoCatch()
+	if not state.AutoCatch then
+		return
+	end
+
+	state.AutoCatch = false
+	cleanupFeature("AutoCatch")
+
+	if state.MovementOwner == "AutoCatch" then
+		state.MovementOwner = "None"
+	end
+end
+
+local function stopFly()
+	if not state.Fly then
+		return
+	end
+
+	state.Fly = false
+	cleanupFeature("FlyPhysics")
+
+	if state.MovementOwner == "Fly" then
+		state.MovementOwner = "None"
+	end
+
+	updateFlightControls()
+end
+
+local function claimMovement(owner: string)
+	if owner == "Fly" then
+		stopAutoCatch()
+	elseif owner == "AutoCatch" then
+		stopFly()
+	end
+
+	state.MovementOwner = owner
+end
+
+--========================================================
+-- FIX LAG — ZERO INITIALIZATION UNTIL ENABLED
+--========================================================
+
+local visualOriginals: {
+	[Instance]: {[string]: any}
+} = {}
+
+local function saveVisualProperty(
+	instance: Instance,
+	property: string
+)
+	local values = visualOriginals[instance]
+
+	if not values then
+		values = {}
+		visualOriginals[instance] = values
+	end
+
+	if values[property] == nil then
+		values[property] = instance[property]
+	end
+end
+
+local visualProperties = {
+	ParticleEmitter = "Enabled",
+	Trail = "Enabled",
+	Beam = "Enabled",
+	Smoke = "Enabled",
+	Fire = "Enabled",
+	Sparkles = "Enabled",
+	PointLight = "Enabled",
+	SpotLight = "Enabled",
+	SurfaceLight = "Enabled",
+}
+
+local function reduceVisual(instance: Instance)
+	local property = visualProperties[instance.ClassName]
+
+	if property then
+		saveVisualProperty(instance, property)
+		instance[property] = false
+	end
+
+	if instance:IsA("BasePart") then
+		saveVisualProperty(instance, "CastShadow")
+		instance.CastShadow = false
+	end
+end
+
+local function enableFixLag()
+	-- First Workspace scan happens HERE, never at startup.
+	for _, instance in ipairs(workspace:GetDescendants()) do
+		reduceVisual(instance)
+	end
+
+	for _, instance in ipairs(Lighting:GetChildren()) do
+		if instance:IsA("BloomEffect")
+			or instance:IsA("BlurEffect")
+			or instance:IsA("SunRaysEffect")
+			or instance:IsA("ColorCorrectionEffect")
+			or instance:IsA("DepthOfFieldEffect") then
+
+			saveVisualProperty(instance, "Enabled")
+			instance.Enabled = false
+		end
+	end
+
+	addConnection(
+		"FixLag",
+		workspace.DescendantAdded:Connect(function(instance)
+			if state.FixLag then
+				reduceVisual(instance)
+			end
+		end)
+	)
+end
+
+local function disableFixLag()
+	cleanupFeature("FixLag")
+
+	for instance, values in pairs(visualOriginals) do
+		if instance.Parent then
+			for property, value in pairs(values) do
+				instance[property] = value
+			end
+		end
+	end
+
+	table.clear(visualOriginals)
+end
+
+local function setFixLag(enabled: boolean)
+	state.FixLag = enabled
+
+	if enabled then
+		enableFixLag()
+		notify("Fix Lag enabled.")
+	else
+		disableFixLag()
+		notify("Fix Lag restored.")
+	end
+end
+
+--========================================================
+-- FULL BRIGHT — DORMANT UNTIL ENABLED
+--========================================================
+
+local lightingOriginals: {[string]: any} = {}
+
+local function enableFullBright()
+	lightingOriginals.Brightness = Lighting.Brightness
+	lightingOriginals.Ambient = Lighting.Ambient
+	lightingOriginals.OutdoorAmbient = Lighting.OutdoorAmbient
+	lightingOriginals.ExposureCompensation =
+		Lighting.ExposureCompensation
+	lightingOriginals.GlobalShadows = Lighting.GlobalShadows
+
+	Lighting.Brightness = 2
+	Lighting.Ambient = Color3.fromRGB(135, 135, 135)
+	Lighting.OutdoorAmbient = Color3.fromRGB(170, 170, 170)
+	Lighting.ExposureCompensation = 0.5
+	Lighting.GlobalShadows = false
+end
+
+local function disableFullBright()
+	for property, value in pairs(lightingOriginals) do
+		Lighting[property] = value
+	end
+
+	table.clear(lightingOriginals)
+end
+
+local function setFullBright(enabled: boolean)
+	state.FullBright = enabled
+
+	if enabled then
+		enableFullBright()
+		notify("Full Bright enabled.")
+	else
+		disableFullBright()
+		notify("Lighting restored.")
+	end
+end
+
+--========================================================
+-- WALK / JUMP — CHARACTER ACCESS ONLY AFTER TOGGLE
+--========================================================
+
+local characterOriginals = {
+	WalkSpeed = nil :: number?,
+	UseJumpPower = nil :: boolean?,
+	JumpPower = nil :: number?,
+	JumpHeight = nil :: number?,
+}
+
+local function cacheCharacterMovement()
+	local _, humanoid = getCharacterObjects()
+
+	if not humanoid then
+		return
+	end
+
+	characterOriginals.WalkSpeed = humanoid.WalkSpeed
+	characterOriginals.UseJumpPower = humanoid.UseJumpPower
+
+	if humanoid.UseJumpPower then
+		characterOriginals.JumpPower = humanoid.JumpPower
+	else
+		characterOriginals.JumpHeight = humanoid.JumpHeight
+	end
+end
+
+function applyWalkSpeed()
+	local _, humanoid = getCharacterObjects()
+
+	if not humanoid then
+		return
+	end
+
+	if state.SpeedWalk then
+		humanoid.WalkSpeed = state.WalkSpeed
+	elseif characterOriginals.WalkSpeed then
+		humanoid.WalkSpeed = characterOriginals.WalkSpeed
+	end
+end
+
+function applyJump()
+	local _, humanoid = getCharacterObjects()
+
+	if not humanoid then
+		return
+	end
+
+	if humanoid.UseJumpPower then
+		if state.HighJump then
+			humanoid.JumpPower = state.Jump
+		elseif characterOriginals.JumpPower then
+			humanoid.JumpPower = characterOriginals.JumpPower
+		end
+	else
+		if state.HighJump then
+			humanoid.JumpHeight = state.Jump
+		elseif characterOriginals.JumpHeight then
+			humanoid.JumpHeight = characterOriginals.JumpHeight
 		end
 	end
 end
+
+local function setSpeedWalk(enabled: boolean)
+	if enabled then
+		cacheCharacterMovement()
+		bindCharacterLifecycle()
+
+		state.SpeedWalk = true
+		applyWalkSpeed()
+		notify("Walk Speed enabled.")
+	else
+		state.SpeedWalk = false
+		applyWalkSpeed()
+		notify("Walk Speed restored.")
+		unbindCharacterLifecycle()
+	end
+end
+
+local function setHighJump(enabled: boolean)
+	if enabled then
+		cacheCharacterMovement()
+		bindCharacterLifecycle()
+
+		state.HighJump = true
+		applyJump()
+		notify("Jump enabled.")
+	else
+		state.HighJump = false
+		applyJump()
+		notify("Jump restored.")
+		unbindCharacterLifecycle()
+	end
+end
+
+--========================================================
+-- FLY — NO PHYSICS OBJECTS EXIST BEFORE ENABLE
+--========================================================
+
+local flyVelocity = nil
+local flyGyro = nil
+
+function enableFlyPhysics()
+	-- Body movers are created only here, after Fly is enabled.
+	local _, humanoid, root = getCharacterObjects()
+
+	if not humanoid or not root then
+		notify("Fly unavailable until the character is ready.")
+		return
+	end
+
+	if flyVelocity then
+		flyVelocity:Destroy()
+	end
+
+	if flyGyro then
+		flyGyro:Destroy()
+	end
+
+	flyVelocity = Instance.new("BodyVelocity")
+	flyVelocity.MaxForce = Vector3.new(100000, 100000, 100000)
+	flyVelocity.P = 5000
+	flyVelocity.Velocity = Vector3.zero
+	flyVelocity.Parent = root
+
+	flyGyro = Instance.new("BodyGyro")
+	flyGyro.MaxTorque = Vector3.new(100000, 100000, 100000)
+	flyGyro.P = 5000
+	flyGyro.CFrame = root.CFrame
+	flyGyro.Parent = root
+
+	disconnectFeature("FlyPhysics")
+
+	addConnection(
+		"FlyPhysics",
+		RunService.RenderStepped:Connect(function()
+			if not state.Fly then
+				return
+			end
+
+			if not flyVelocity or not flyVelocity.Parent then
+				enableFlyPhysics()
+				return
+			end
+
+			if not flyGyro or not flyGyro.Parent then
+				enableFlyPhysics()
+				return
+			end
+
+			local camera = workspace.CurrentCamera
+			local _, currentHumanoid, currentRoot =
+				getCharacterObjects()
+
+			if not camera or not currentHumanoid or not currentRoot then
+				return
+			end
+
+			local velocity =
+				currentHumanoid.MoveDirection * state.FlySpeed
+
+			if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
+				velocity += Vector3.yAxis * state.FlySpeed
+			end
+
+			if UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
+				velocity -= Vector3.yAxis * state.FlySpeed
+			end
+
+			if upHeld then
+				velocity += Vector3.yAxis * state.FlySpeed
+			end
+
+			if downHeld then
+				velocity -= Vector3.yAxis * state.FlySpeed
+			end
+
+			flyVelocity.Velocity = velocity
+			flyGyro.CFrame = camera.CFrame
+		end)
+	)
+end
+
+function updateFlightControls()
+	upButton.Visible = state.Fly
+	downButton.Visible = state.Fly
+end
+
+local function setFly(enabled: boolean)
+	if enabled then
+		claimMovement("Fly")
+		state.Fly = true
+		bindCharacterLifecycle()
+		enableFlyPhysics()
+		enableNoclipOwner("Fly")
+		updateFlightControls()
+		notify("Fly enabled.")
+	else
+		stopFly()
+		disableNoclipOwner("Fly")
+		applyNoclipState()
+		notify("Fly disabled.")
+	end
+end
+
+--========================================================
+-- NOCLIP REFERENCE COUNTING
+--========================================================
+
+local noclipOwners: {[string]: boolean} = {}
+local noclipStepped: RBXScriptConnection? = nil
+
+function applyNoclipState()
+	local enabled = false
+
+	for _, ownerEnabled in pairs(noclipOwners) do
+		if ownerEnabled then
+			enabled = true
+			break
+		end
+	end
+
+	local character = LocalPlayer.Character
+
+	if not character then
+		return
+	end
+
+	for _, instance in ipairs(character:GetDescendants()) do
+		if instance:IsA("BasePart") then
+			instance.CanCollide = not enabled
+		end
+	end
+end
+
+function updateNoclipController()
+	local shouldRun = false
+
+	for _, ownerEnabled in pairs(noclipOwners) do
+		if ownerEnabled then
+			shouldRun = true
+			break
+		end
+	end
+
+	if shouldRun and not noclipStepped then
+		noclipStepped = RunService.Stepped:Connect(function()
+			applyNoclipState()
+		end)
+	elseif not shouldRun and noclipStepped then
+		noclipStepped:Disconnect()
+		noclipStepped = nil
+	end
+
+	applyNoclipState()
+end
+
+function enableNoclipOwner(owner: string)
+	noclipOwners[owner] = true
+	updateNoclipController()
+end
+
+function disableNoclipOwner(owner: string)
+	noclipOwners[owner] = nil
+	updateNoclipController()
+end
+
+local function setManualNoclip(enabled: boolean)
+	state.Noclip = enabled
+
+	if enabled then
+		enableNoclipOwner("Manual")
+	else
+		disableNoclipOwner("Manual")
+	end
+
+	if featureNeedsCharacter() then
+		bindCharacterLifecycle()
+	else
+		unbindCharacterLifecycle()
+	end
+end
+
+--========================================================
+-- EGG TARGETING
+--========================================================
 
 local function getEggPart(egg: Instance): BasePart?
 	if not egg:IsA("Model") then
@@ -230,55 +838,75 @@ local function getEggPart(egg: Instance): BasePart?
 	return egg:FindFirstChildWhichIsA("BasePart", true)
 end
 
-local function isEggValid(egg: Instance): boolean
+local function isValidEgg(egg: Instance): boolean
 	local part = getEggPart(egg)
+
 	if not part then
 		return false
 	end
 
-	return egg:IsDescendantOf(workspace) and part.Transparency < 1
+	return egg:IsDescendantOf(workspace)
+		and part.Transparency < 1
 end
 
-local function getEggs(): {Instance}
-	local found = {}
+local function isTaggedTarget(egg: Instance): boolean
+	for _, tag in ipairs(CONFIG.EggTags) do
+		if tag == state.SelectedEggTag
+			and CollectionService:HasTag(egg, tag) then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function getEggTargets(): {Instance}
+	local results = {}
 	local seen: {[Instance]: boolean} = {}
 
 	for _, tag in ipairs(CONFIG.EggTags) do
-		for _, egg in ipairs(CollectionService:GetTagged(tag)) do
-			if isEggValid(egg) and not seen[egg] then
-				seen[egg] = true
-				table.insert(found, egg)
+		if tag == state.SelectedEggTag then
+			for _, egg in ipairs(CollectionService:GetTagged(tag)) do
+				if isValidEgg(egg) and not seen[egg] then
+					seen[egg] = true
+					table.insert(results, egg)
+				end
 			end
 		end
 	end
 
 	local folder = workspace:FindFirstChild(CONFIG.EggFolderName)
+
 	if folder then
 		for _, egg in ipairs(folder:GetChildren()) do
-			if isEggValid(egg) and not seen[egg] then
-				table.insert(found, egg)
+			if isValidEgg(egg) and not seen[egg] then
+				table.insert(results, egg)
 			end
 		end
 	end
 
-	return found
+	return results
 end
 
-local function nearestEgg(): Instance?
-	local root = state.RootPart
+local function findNearestEgg(): Instance?
+	local _, _, root = getCharacterObjects()
+
 	if not root then
 		return nil
 	end
 
-	local nearest
-	local distance = math.huge
+	local nearest: Instance? = nil
+	local nearestDistance = math.huge
 
-	for _, egg in ipairs(getEggs()) do
-		local part = getEggPart(egg)
+	for _, egg in ipairs(getEggTargets()) do
+				local part = getEggPart(egg)
+
 		if part then
-			local current = (part.Position - root.Position).Magnitude
-			if current < distance then
-				distance = current
+			local distance =
+				(part.Position - root.Position).Magnitude
+
+			if distance < nearestDistance then
+				nearestDistance = distance
 				nearest = egg
 			end
 		end
@@ -287,448 +915,80 @@ local function nearestEgg(): Instance?
 	return nearest
 end
 
---//====================================================
---// LEGITIMATE EGG INTERACTION ADAPTER
---//====================================================
+--========================================================
+-- LEGITIMATE INTERACTION ADAPTER
+--========================================================
 
 local function interactWithEgg(egg: Instance): boolean
-	-- This intentionally does NOT use executor-only
-	-- fireproximityprompt/fireclickdetector APIs.
-
-	local prompt = egg:FindFirstChildWhichIsA("ProximityPrompt", true)
+	local prompt =
+		egg:FindFirstChildWhichIsA("ProximityPrompt", true)
 
 	if prompt and prompt.Enabled then
-		notify("Egg prompt found — use the displayed interaction.", 1.5)
+		notify("ProximityPrompt detected; use the game's normal interaction.")
 		return false
 	end
 
-	local clickDetector = egg:FindFirstChildWhichIsA("ClickDetector", true)
+	local clickDetector =
+		egg:FindFirstChildWhichIsA("ClickDetector", true)
 
 	if clickDetector then
-		notify("Egg click interaction found — click the egg to collect.", 1.5)
+		notify("ClickDetector detected; use the game's normal interaction.")
 		return false
 	end
 
-	local part = getEggPart(egg)
-
-	if part and state.RootPart then
-		notify("Reached egg target.", 1)
-		return true
-	end
-
-	return false
+	return getEggPart(egg) ~= nil
 end
 
---//====================================================
---// FIX LAG
---//====================================================
-
-local visualClasses = {
-	ParticleEmitter = "Enabled",
-	Trail = "Enabled",
-	Beam = "Enabled",
-	Smoke = "Enabled",
-	Fire = "Enabled",
-	Sparkles = "Enabled",
-	PointLight = "Enabled",
-	SpotLight = "Enabled",
-	SurfaceLight = "Enabled",
-}
-
-local function saveVisual(instance: Instance, property: string)
-	original.Visuals[instance] = original.Visuals[instance] or {}
-
-	if original.Visuals[instance][property] == nil then
-		original.Visuals[instance][property] = instance[property]
-	end
-end
-
-local function optimizeVisual(instance: Instance)
-	local property = visualClasses[instance.ClassName]
-	if property then
-		saveVisual(instance, property)
-		instance[property] = false
-	end
-
-	if instance:IsA("BasePart") then
-		saveVisual(instance, "CastShadow")
-		instance.CastShadow = false
-	end
-end
-
-local function enableFixLag()
-	for _, instance in ipairs(workspace:GetDescendants()) do
-		optimizeVisual(instance)
-	end
-
-	for _, instance in ipairs(Lighting:GetChildren()) do
-		if instance:IsA("PostEffect") then
-			saveVisual(instance, "Enabled")
-			instance.Enabled = false
-		end
-	end
-end
-
-local function disableFixLag()
-	for instance, properties in pairs(original.Visuals) do
-		if instance.Parent then
-			for property, value in pairs(properties) do
-				pcall(function()
-					instance[property] = value
-				end)
-			end
-		end
-	end
-
-	table.clear(original.Visuals)
-end
-
-local function setFixLag(enabled: boolean)
-	state.FixLag = enabled
-
-	if enabled then
-		enableFixLag()
-	else
-		disableFixLag()
-	end
-end
-
-connect(workspace.DescendantAdded, function(instance)
-	if state.FixLag then
-		task.defer(optimizeVisual, instance)
-	end
-end)
-
---//====================================================
---// FULL BRIGHT
---//====================================================
-
-local function enableFullBright()
-	original.Lighting.Brightness = Lighting.Brightness
-	original.Lighting.Ambient = Lighting.Ambient
-	original.Lighting.OutdoorAmbient = Lighting.OutdoorAmbient
-	original.Lighting.ExposureCompensation = Lighting.ExposureCompensation
-	original.Lighting.GlobalShadows = Lighting.GlobalShadows
-
-	Lighting.Brightness = 2
-	Lighting.Ambient = Color3.fromRGB(135, 135, 135)
-	Lighting.OutdoorAmbient = Color3.fromRGB(170, 170, 170)
-	Lighting.ExposureCompensation = 0.5
-	Lighting.GlobalShadows = false
-end
-
-local function disableFullBright()
-	for property, value in pairs(original.Lighting) do
-		Lighting[property] = value
-	end
-
-	table.clear(original.Lighting)
-end
-
-local function setFullBright(enabled: boolean)
-	state.FullBright = enabled
-
-	if enabled then
-		enableFullBright()
-	else
-		disableFullBright()
-	end
-end
-
---//====================================================
---// MOVEMENT
---//====================================================
-
-local function applyWalk()
-	if not state.Humanoid then
-		return
-	end
-
-	if state.SpeedWalk then
-		state.Humanoid.WalkSpeed = state.WalkSpeed
-	else
-		state.Humanoid.WalkSpeed = original.Character.WalkSpeed or 16
-	end
-end
-
-local function applyJump()
-	if not state.Humanoid then
-		return
-	end
-
-	if state.Humanoid.UseJumpPower then
-		state.Humanoid.JumpPower = state.HighJump
-			and state.Jump
-			or original.Character.JumpPower
-			or 50
-	else
-		state.Humanoid.JumpHeight = state.HighJump
-			and state.Jump
-			or original.Character.JumpHeight
-			or 7.2
-	end
-end
-
-local function setSpeed(enabled: boolean)
-	state.SpeedWalk = enabled
-	applyWalk()
-end
-
-local function setJump(enabled: boolean)
-	state.HighJump = enabled
-	applyJump()
-end
-
-connect(RunService.Heartbeat, function()
-	if state.SpeedWalk then
-		applyWalk()
-	end
-
-	if state.HighJump then
-		applyJump()
-	end
-end)
-
---//====================================================
---// FLY
---//====================================================
-
-local function removeFlyForces()
-	if flyVelocity then
-		flyVelocity:Destroy()
-		flyVelocity = nil
-	end
-
-	if flyGyro then
-		flyGyro:Destroy()
-		flyGyro = nil
-	end
-end
-
-local function createFlyForces()
-	local root = state.RootPart
-	if not root then
-		return
-	end
-
-	removeFlyForces()
-
-	flyVelocity = Instance.new("BodyVelocity")
-	flyVelocity.MaxForce = Vector3.new(1e5, 1e5, 1e5)
-	flyVelocity.P = 5000
-	flyVelocity.Velocity = Vector3.zero
-	flyVelocity.Parent = root
-
-	flyGyro = Instance.new("BodyGyro")
-	flyGyro.MaxTorque = Vector3.new(1e5, 1e5, 1e5)
-	flyGyro.P = 5000
-	flyGyro.CFrame = root.CFrame
-	flyGyro.Parent = root
-end
-
-local function setFly(enabled: boolean)
-	state.Fly = enabled
-
-	if enabled then
-		createFlyForces()
-	else
-		removeFlyForces()
-	end
-end
-
-connect(RunService.RenderStepped, function()
-	if not state.Fly or not flyVelocity or not flyGyro then
-		return
-	end
-
-	local root = state.RootPart
-	if not root then
-		return
-	end
-
-	local camera = Camera
-	local move = state.Humanoid and state.Humanoid.MoveDirection or Vector3.zero
-	local velocity = move * state.FlySpeed
-
-	if UserInputService:IsKeyDown(Enum.KeyCode.Space) then
-		velocity += Vector3.yAxis * state.FlySpeed
-	elseif UserInputService:IsKeyDown(Enum.KeyCode.LeftControl) then
-		velocity -= Vector3.yAxis * state.FlySpeed
-	end
-
-	flyVelocity.Velocity = velocity
-	flyGyro.CFrame = camera.CFrame
-end)
-
---//====================================================
---// MOBILE FLY BUTTONS
---//====================================================
-
-local flightGui = Instance.new("ScreenGui")
-flightGui.Name = "MrDonFlightControls"
-flightGui.ResetOnSpawn = false
-flightGui.IgnoreGuiInset = false
-flightGui.Parent = LocalPlayer.PlayerGui
-
-local function makeFlightButton(text: string, position: UDim2): TextButton
-	local button = Instance.new("TextButton")
-	button.Size = UDim2.fromOffset(48, 48)
-	button.Position = position
-	button.AnchorPoint = Vector2.new(1, 1)
-	button.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
-	button.BackgroundTransparency = 0.35
-	button.TextColor3 = Color3.new(1, 1, 1)
-	button.Text = text
-	button.TextSize = 20
-	button.Font = Enum.Font.GothamBold
-	button.Visible = false
-	button.Parent = flightGui
-
-	Instance.new("UICorner", button).CornerRadius = UDim.new(1, 0)
-
-	return button
-end
-
-local upButton = makeFlightButton("▲", UDim2.new(1, -24, 1, -150))
-local downButton = makeFlightButton("▼", UDim2.new(1, -24, 1, -94))
-
-local upHeld = false
-local downHeld = false
-
-connect(upButton.InputBegan, function(input)
-	if input.UserInputType == Enum.UserInputType.Touch
-		or input.UserInputType == Enum.UserInputType.MouseButton1 then
-		upHeld = true
-	end
-end)
-
-connect(upButton.InputEnded, function()
-	upHeld = false
-end)
-
-connect(downButton.InputBegan, function(input)
-	if input.UserInputType == Enum.UserInputType.Touch
-		or input.UserInputType == Enum.UserInputType.MouseButton1 then
-		downHeld = true
-	end
-end)
-
-connect(downButton.InputEnded, function()
-	downHeld = false
-end)
-
-connect(RunService.RenderStepped, function()
-	if not state.Fly or not flyVelocity then
-		return
-	end
-
-	local velocity = flyVelocity.Velocity
-
-	if upHeld then
-		velocity += Vector3.yAxis * state.FlySpeed
-	end
-
-	if downHeld then
-		velocity -= Vector3.yAxis * state.FlySpeed
-	end
-
-	flyVelocity.Velocity = velocity
-end)
-
-local function updateFlightButtons()
-	upButton.Visible = state.Fly
-	downButton.Visible = state.Fly
-end
-
---//====================================================
---// NOCLIP
---//====================================================
-
-local function noclipEnabled()
-	for _, enabled in pairs(noclipOwners) do
-		if enabled then
-			return true
-		end
-	end
-
-	return false
-end
-
-local function setNoclipOwner(owner: string, enabled: boolean)
-	noclipOwners[owner] = enabled
-	state.Noclip = noclipEnabled()
-end
-
-local function applyNoclip()
-	local character = state.Character
-	if not character then
-		return
-	end
-
-	for _, instance in ipairs(character:GetDescendants()) do
-		if instance:IsA("BasePart") then
-			instance.CanCollide = not state.Noclip
-		end
-	end
-end
-
-local function setNoclip(enabled: boolean)
-	setNoclipOwner("Manual", enabled)
-	applyNoclip()
-end
-
-connect(RunService.Stepped, function()
-	if state.Noclip then
-		applyNoclip()
-	end
-end)
-
---//====================================================
---// AUTO CATCH ASSIST
---//====================================================
-
-local autoCatchRunning = false
+--========================================================
+-- AUTO CATCH
+--========================================================
 
 local function moveToEgg(egg: Instance): boolean
-	local root = state.RootPart
+	local _, _, root = getCharacterObjects()
 	local part = getEggPart(egg)
 
-	if not root or not part or not isEggValid(egg) then
+	if not root or not part or not isValidEgg(egg) then
 		return false
 	end
 
-	local distance = (part.Position - root.Position).Magnitude
-	local duration = math.clamp(distance / 80, 0.15, 1.5)
+	local distance =
+		(part.Position - root.Position).Magnitude
 
-	local target = part.Position
+	local duration = math.clamp(distance / 80, 0.15, 1.5)
+	local destination = part.Position + Vector3.new(0, 2, 0)
+
 	local tween = TweenService:Create(
 		root,
-		TweenInfo.new(duration, Enum.EasingStyle.Linear),
-		{CFrame = CFrame.new(target + Vector3.new(0, 2, 0))}
+		TweenInfo.new(
+			duration,
+			Enum.EasingStyle.Linear,
+			Enum.EasingDirection.Out
+		),
+		{
+			CFrame = CFrame.new(destination)
+		}
 	)
 
 	tween:Play()
 	tween.Completed:Wait()
 
-	return isEggValid(egg)
+	return isValidEgg(egg)
 end
 
 local function autoCatchLoop()
-	if autoCatchRunning then
-		return
-	end
-
-	autoCatchRunning = true
+	local feature = "AutoCatch"
 
 	while state.AutoCatch do
-		local egg = nearestEgg()
+		local egg = findNearestEgg()
 
 		if egg then
-			local reached = moveToEgg(egg)
+			enableNoclipOwner("AutoCatch")
 
-			if reached then
+			if moveToEgg(egg) and isValidEgg(egg) then
 				interactWithEgg(egg)
 			end
+
+			disableNoclipOwner("AutoCatch")
 		else
 			task.wait(0.25)
 		end
@@ -736,163 +996,187 @@ local function autoCatchLoop()
 		task.wait(state.AutoFarmDelay)
 	end
 
-	autoCatchRunning = false
+	disableNoclipOwner("AutoCatch")
+	cleanupFeature(feature)
 end
 
 local function setAutoCatch(enabled: boolean)
-	state.AutoCatch = enabled
-
 	if enabled then
-		spawnTask(autoCatchLoop)
+		claimMovement("AutoCatch")
+		state.AutoCatch = true
+		bindCharacterLifecycle()
+
+		local thread = task.spawn(autoCatchLoop)
+		addTask("AutoCatch", thread)
+
+		notify("Auto Catch enabled.")
+	else
+		stopAutoCatch()
+		disableNoclipOwner("AutoCatch")
+		notify("Auto Catch disabled.")
+		unbindCharacterLifecycle()
 	end
+
+	updateStatus()
 end
 
---//====================================================
---// ANTI-AFK
---//====================================================
-
-local antiAfkRunning = false
-
-local function antiAfkLoop()
-	if antiAfkRunning then
-		return
-	end
-
-	antiAfkRunning = true
-
-	while state.AntiAFK do
-		task.wait(CONFIG.AntiAFKInterval)
-
-		if not state.AntiAFK then
-			break
-		end
-
-		local camera = workspace.CurrentCamera
-		if camera then
-			local originalCFrame = camera.CFrame
-			camera.CFrame = originalCFrame * CFrame.Angles(0, math.rad(1), 0)
-
-			task.wait(0.15)
-
-			if camera then
-				camera.CFrame = originalCFrame
-			end
-		end
-
-		-- VirtualUser is only used for Roblox's local idle signal.
-		pcall(function()
-			VirtualUser:CaptureController()
-			VirtualUser:ClickButton2(Vector2.new())
-		end)
-	end
-
-	antiAfkRunning = false
-end
+--========================================================
+-- ANTI-AFK
+--========================================================
 
 local function setAntiAFK(enabled: boolean)
 	state.AntiAFK = enabled
+	cleanupFeature("AntiAFK")
 
-	if enabled then
-		spawnTask(antiAfkLoop)
+	if not enabled then
+		updateStatus()
+		notify("Anti-AFK disabled.")
+		return
+	end
+
+	local VirtualUser = game:GetService("VirtualUser")
+
+	addConnection(
+		"AntiAFK",
+		LocalPlayer.Idled:Connect(function()
+			VirtualUser:CaptureController()
+			VirtualUser:ClickButton2(Vector2.new())
+		end)
+	)
+
+	updateStatus()
+	notify("Anti-AFK enabled.")
+end
+
+--========================================================
+-- ESP
+--========================================================
+
+local espFolder: Folder? = nil
+
+local function ensureESPFolder()
+	if not espFolder then
+		espFolder = Instance.new("Folder")
+		espFolder.Name = "MrDonESP"
+		espFolder.Parent = gui
+	end
+
+	return espFolder
+end
+
+local function clearESP()
+	if espFolder then
+		espFolder:ClearAllChildren()
 	end
 end
 
---//====================================================
---// ESP
---//====================================================
-
-local espFolder = Instance.new("Folder")
-espFolder.Name = "MrDonESP"
-espFolder.Parent = workspace
-
-local function clearESP()
-	espFolder:ClearAllChildren()
-end
-
-local function makeEggESP(egg: Instance)
+local function createEggESP(egg: Instance)
 	local part = getEggPart(egg)
+
 	if not part then
 		return
 	end
 
-	local tag
-	for _, candidate in ipairs(CONFIG.EggTags) do
-		if CollectionService:HasTag(egg, candidate) then
-			tag = candidate
-			break
-		end
-	end
-
-	if not tag then
-		return
-	end
+	local folder = ensureESPFolder()
+	local rarity = state.SelectedEggTag
+	local color = CONFIG.RarityColors[rarity]
 
 	local highlight = Instance.new("Highlight")
 	highlight.Adornee = egg
-	highlight.FillColor = CONFIG.RarityColors[tag]
-	highlight.OutlineColor = CONFIG.RarityColors[tag]
+	highlight.FillColor = color
+	highlight.OutlineColor = color
 	highlight.FillTransparency = 0.75
 	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-	highlight.Parent = espFolder
+	highlight.Parent = folder
+
+	local billboard = Instance.new("BillboardGui")
+	billboard.Adornee = part
+	billboard.Size = UDim2.fromOffset(120, 25)
+	billboard.StudsOffset = Vector3.new(0, 2.5, 0)
+	billboard.AlwaysOnTop = true
+	billboard.Parent = folder
+
+	local label = Instance.new("TextLabel")
+	label.Size = UDim2.fromScale(1, 1)
+	label.BackgroundTransparency = 1
+	label.Text = rarity
+	label.TextColor3 = color
+	label.Font = Enum.Font.GothamBold
+	label.TextSize = 10
+	label.Parent = billboard
 end
 
-local function makePlayerESP(player: Player)
+local function getPlayerColor(player: Player): Color3
+	if player.Team == LocalPlayer.Team then
+		return CONFIG.TeamColors.Friendly
+	end
+
+	if player.Team then
+		return CONFIG.TeamColors.Enemy
+	end
+
+	return CONFIG.TeamColors.Neutral
+end
+
+local function createPlayerESP(player: Player)
 	if player == LocalPlayer then
 		return
 	end
 
 	local character = player.Character
+
 	if not character then
 		return
 	end
 
-	local root = character:FindFirstChild("HumanoidRootPart")
-	local humanoid = character:FindFirstChildOfClass("Humanoid")
+	local root =
+		character:FindFirstChild("HumanoidRootPart")
+
+	local humanoid =
+		character:FindFirstChildOfClass("Humanoid")
 
 	if not root or not humanoid then
 		return
 	end
 
+	local folder = ensureESPFolder()
+	local color = getPlayerColor(player)
+
 	local highlight = Instance.new("Highlight")
 	highlight.Adornee = character
-	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
-
-	if player.Team == LocalPlayer.Team then
-		highlight.FillColor = CONFIG.TeamColors.Friendly
-	elseif player.Team then
-		highlight.FillColor = CONFIG.TeamColors.Enemy
-	else
-		highlight.FillColor = CONFIG.TeamColors.Neutral
-	end
-
+	highlight.FillColor = color
+	highlight.OutlineColor = color
 	highlight.FillTransparency = 0.8
-	highlight.Parent = espFolder
+	highlight.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	highlight.Parent = folder
+
+	local distance = 0
+	local _, _, localRoot = getCharacterObjects()
+
+	if localRoot then
+		distance =
+			math.floor((root.Position - localRoot.Position).Magnitude)
+	end
 
 	local billboard = Instance.new("BillboardGui")
 	billboard.Adornee = root
-	billboard.Size = UDim2.fromOffset(150, 45)
+	billboard.Size = UDim2.fromOffset(150, 42)
 	billboard.StudsOffset = Vector3.new(0, 3.2, 0)
 	billboard.AlwaysOnTop = true
-	billboard.Parent = espFolder
+	billboard.Parent = folder
 
 	local label = Instance.new("TextLabel")
 	label.Size = UDim2.fromScale(1, 1)
 	label.BackgroundTransparency = 1
-	label.TextColor3 = highlight.FillColor
+	label.TextColor3 = color
 	label.Font = Enum.Font.GothamMedium
-	label.TextSize = 11
-
-	local distance = state.RootPart
-		and math.floor((root.Position - state.RootPart.Position).Magnitude)
-		or 0
-
+	label.TextSize = 10
 	label.Text = string.format(
-		"%s\n%d studs | HP %d",
+		"%s\n%d studs • HP %d",
 		player.DisplayName,
 		distance,
 		math.floor(humanoid.Health)
 	)
-
 	label.Parent = billboard
 end
 
@@ -900,186 +1184,194 @@ local function updateESP()
 	clearESP()
 
 	if state.EggESP then
-		for _, egg in ipairs(getEggs()) do
-			makeEggESP(egg)
+		for _, egg in ipairs(getEggTargets()) do
+			createEggESP(egg)
 		end
 	end
 
 	if state.PlayerESP then
 		for _, player in ipairs(Players:GetPlayers()) do
-			makePlayerESP(player)
+			createPlayerESP(player)
 		end
 	end
 end
 
-spawnTask(function()
-	while true do
-		task.wait(CONFIG.ESPUpdateInterval)
-
-		if state.EggESP or state.PlayerESP then
-			updateESP()
-		end
-	end
-end)
-
-local function setEggESP(enabled: boolean)
-	state.EggESP = enabled
-
-	if enabled then
-		updateESP()
+local function setESP(enabled: boolean, playerMode: boolean)
+	if playerMode then
+		state.PlayerESP = enabled
 	else
-		clearESP()
+		state.EggESP = enabled
 	end
+
+	cleanupFeature("ESP")
+
+	if not state.PlayerESP and not state.EggESP then
+		clearESP()
+		return
+	end
+
+	local thread = task.spawn(function()
+		while state.PlayerESP or state.EggESP do
+			updateESP()
+			task.wait(CONFIG.ESPUpdateInterval)
+		end
+	end)
+
+	addTask("ESP", thread)
+
+	notify(
+		playerMode
+			and "Player ESP updated."
+			or "Egg ESP updated."
+	)
 end
 
-local function setPlayerESP(enabled: boolean)
-	state.PlayerESP = enabled
+--========================================================
+-- MOBILE FLY CONTROLS
+--========================================================
 
-	if enabled then
-		updateESP()
-	elseif not state.EggESP then
-		clearESP()
-	end
+local flightGui = Instance.new("ScreenGui")
+flightGui.Name = "MrDonFlightControls"
+flightGui.ResetOnSpawn = false
+flightGui.Parent = PlayerGui
+
+local function makeFlightButton(
+	textValue: string,
+	position: UDim2
+): TextButton
+	local button = Instance.new("TextButton")
+
+	button.Size = UDim2.fromOffset(48, 48)
+	button.Position = position
+	button.AnchorPoint = Vector2.new(1, 1)
+	button.BackgroundColor3 = Color3.fromRGB(0, 0, 0)
+	button.BackgroundTransparency = 0.35
+	button.TextColor3 = Color3.new(1, 1, 1)
+	button.Text = textValue
+	button.TextSize = 19
+	button.Font = Enum.Font.GothamBold
+	button.Visible = false
+	button.Parent = flightGui
+
+	Instance.new("UICorner", button).CornerRadius =
+		UDim.new(1, 0)
+
+	return button
 end
 
---//====================================================
---// CHARACTER RESPAWN
---//====================================================
+local upButton = makeFlightButton(
+	"▲",
+	UDim2.new(1, -24, 1, -150)
+)
 
-connect(LocalPlayer.CharacterAdded, function()
-	task.wait(0.25)
-	refreshCharacter()
+local downButton = makeFlightButton(
+	"▼",
+	UDim2.new(1, -24, 1, -94)
+)
 
-	if state.Fly then
-		createFlyForces()
+upHeld = false
+downHeld = false
+
+upButton.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch
+		or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		upHeld = true
 	end
-
-	applyWalk()
-	applyJump()
-	applyNoclip()
 end)
 
-refreshCharacter()
+upButton.InputEnded:Connect(function()
+	upHeld = false
+end)
 
---//====================================================
---// UI
---//====================================================
+downButton.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch
+		or input.UserInputType == Enum.UserInputType.MouseButton1 then
+		downHeld = true
+	end
+end)
 
-local gui = Instance.new("ScreenGui")
-gui.Name = GUI_NAME
-gui.ResetOnSpawn = false
-gui.IgnoreGuiInset = false
-gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
-gui.Parent = LocalPlayer.PlayerGui
+downButton.InputEnded:Connect(function()
+	downHeld = false
+end)
 
-local main = Instance.new("Frame")
-main.Size = UDim2.fromOffset(360, 430)
-main.Position = UDim2.new(0, 25, 0.5, -215)
-main.BackgroundColor3 = Color3.fromRGB(22, 23, 28)
-main.BorderSizePixel = 0
-main.Parent = gui
+--========================================================
+-- UI FACTORIES
+--========================================================
 
-Instance.new("UICorner", main).CornerRadius = UDim.new(0, 12)
-
-local title = Instance.new("TextLabel")
-title.Size = UDim2.new(1, -90, 0, 42)
-title.Position = UDim2.fromOffset(15, 0)
-title.BackgroundTransparency = 1
-title.Text = "MrDon • Egg Utility"
-title.TextColor3 = Color3.new(1, 1, 1)
-title.TextXAlignment = Enum.TextXAlignment.Left
-title.Font = Enum.Font.GothamBold
-title.TextSize = 15
-title.Parent = main
-
-local close = Instance.new("TextButton")
-close.Size = UDim2.fromOffset(32, 30)
-close.Position = UDim2.new(1, -38, 0, 6)
-close.Text = "×"
-close.TextSize = 22
-close.TextColor3 = Color3.new(1, 1, 1)
-close.BackgroundTransparency = 1
-close.Parent = main
-
-local minimize = Instance.new("TextButton")
-minimize.Size = UDim2.fromOffset(32, 30)
-minimize.Position = UDim2.new(1, -72, 0, 6)
-minimize.Text = "—"
-minimize.TextSize = 18
-minimize.TextColor3 = Color3.new(1, 1, 1)
-minimize.BackgroundTransparency = 1
-minimize.Parent = main
-
-local content = Instance.new("ScrollingFrame")
-content.Size = UDim2.new(1, -20, 1, -55)
-content.Position = UDim2.fromOffset(10, 48)
-content.BackgroundTransparency = 1
-content.BorderSizePixel = 0
-content.ScrollBarThickness = 4
-content.CanvasSize = UDim2.new()
-content.AutomaticCanvasSize = Enum.AutomaticSize.Y
-content.Parent = main
-
-local list = Instance.new("UIListLayout")
-list.Padding = UDim.new(0, 6)
-list.Parent = content
-
-local function makeRow(name: string, callback: (boolean) -> ())
+local function makeToggle(
+	name: string,
+	initial: boolean,
+	callback: (boolean) -> ()
+)
 	local row = Instance.new("Frame")
 	row.Size = UDim2.new(1, -8, 0, 38)
 	row.BackgroundColor3 = Color3.fromRGB(30, 31, 37)
 	row.Parent = content
 
-	Instance.new("UICorner", row).CornerRadius = UDim.new(0, 7)
+	Instance.new("UICorner", row).CornerRadius =
+		UDim.new(0, 7)
 
 	local label = Instance.new("TextLabel")
-	label.Size = UDim2.new(1, -60, 1, 0)
+	label.Size = UDim2.new(1, -65, 1, 0)
 	label.Position = UDim2.fromOffset(10, 0)
 	label.BackgroundTransparency = 1
 	label.Text = name
 	label.TextColor3 = Color3.new(1, 1, 1)
 	label.TextXAlignment = Enum.TextXAlignment.Left
 	label.Font = Enum.Font.GothamMedium
-	label.TextSize = 12
+	label.TextSize = 11
 	label.Parent = row
 
 	local button = Instance.new("TextButton")
 	button.Size = UDim2.fromOffset(45, 25)
 	button.Position = UDim2.new(1, -52, 0.5, -12)
-	button.Text = "OFF"
+	button.Text = initial and "ON" or "OFF"
 	button.TextColor3 = Color3.new(1, 1, 1)
-	button.BackgroundColor3 = Color3.fromRGB(65, 65, 72)
+	button.BackgroundColor3 =
+		initial
+			and Color3.fromRGB(45, 130, 80)
+			or Color3.fromRGB(65, 65, 72)
 	button.Font = Enum.Font.GothamBold
 	button.TextSize = 10
 	button.Parent = row
 
-	Instance.new("UICorner", button).CornerRadius = UDim.new(0, 6)
+	Instance.new("UICorner", button).CornerRadius =
+		UDim.new(0, 6)
 
-	local enabled = false
+	local enabled = initial
 
-	connect(button.Activated, function()
+	button.Activated:Connect(function()
 		enabled = not enabled
+
 		button.Text = enabled and "ON" or "OFF"
+		button.BackgroundColor3 =
+			enabled
+				and Color3.fromRGB(45, 130, 80)
+				or Color3.fromRGB(65, 65, 72)
+
 		callback(enabled)
 	end)
+
+	return row
 end
 
-local function makeNumberRow(
+local function makeNumberInput(
 	name: string,
 	minimum: number,
 	maximum: number,
-	defaultValue: number,
+	value: number,
 	callback: (number) -> ()
 )
 	local row = Instance.new("Frame")
-	row.Size = UDim2.new(1, -8, 0, 48)
+	row.Size = UDim2.new(1, -8, 0, 46)
 	row.BackgroundColor3 = Color3.fromRGB(30, 31, 37)
 	row.Parent = content
 
-	Instance.new("UICorner", row).CornerRadius = UDim.new(0, 7)
+	Instance.new("UICorner", row).CornerRadius =
+		UDim.new(0, 7)
 
 	local label = Instance.new("TextLabel")
-	label.Size = UDim2.new(0.42, 0, 1, 0)
+	label.Size = UDim2.new(0.44, 0, 1, 0)
 	label.Position = UDim2.fromOffset(10, 0)
 	label.BackgroundTransparency = 1
 	label.Text = name
@@ -1090,9 +1382,9 @@ local function makeNumberRow(
 	label.Parent = row
 
 	local box = Instance.new("TextBox")
-	box.Size = UDim2.new(0.48, 0, 0, 28)
-	box.Position = UDim2.new(0.48, 0, 0.5, -14)
-	box.Text = tostring(defaultValue)
+	box.Size = UDim2.new(0.47, 0, 0, 27)
+	box.Position = UDim2.new(0.48, 0, 0.5, -13)
+	box.Text = tostring(value)
 	box.ClearTextOnFocus = false
 	box.TextColor3 = Color3.new(1, 1, 1)
 	box.BackgroundColor3 = Color3.fromRGB(45, 46, 53)
@@ -1100,34 +1392,42 @@ local function makeNumberRow(
 	box.TextSize = 11
 	box.Parent = row
 
-	Instance.new("UICorner", box).CornerRadius = UDim.new(0, 6)
+	Instance.new("UICorner", box).CornerRadius =
+		UDim.new(0, 6)
 
-	connect(box.FocusLost, function()
-		local value = tonumber(box.Text)
+	box.FocusLost:Connect(function()
+		local numberValue = tonumber(box.Text)
 
-		if not value then
-			box.Text = tostring(defaultValue)
-			notify(name .. ": invalid number", 1.5)
+		if not numberValue then
+			box.Text = tostring(value)
+			notify(name .. ": invalid number.")
 			return
 		end
 
-		value = math.clamp(value, minimum, maximum)
-		box.Text = tostring(value)
-		callback(value)
+		numberValue = math.clamp(
+			numberValue,
+			minimum,
+			maximum
+		)
+
+		value = numberValue
+		box.Text = tostring(numberValue)
+		callback(numberValue)
 	end)
 end
 
 local function makeEggSelector()
 	local row = Instance.new("Frame")
-	row.Size = UDim2.new(1, -8, 0, 74)
+	row.Size = UDim2.new(1, -8, 0, 82)
 	row.BackgroundColor3 = Color3.fromRGB(30, 31, 37)
 	row.Parent = content
 
-	Instance.new("UICorner", row).CornerRadius = UDim.new(0, 7)
+	Instance.new("UICorner", row).CornerRadius =
+		UDim.new(0, 7)
 
 	local search = Instance.new("TextBox")
 	search.Size = UDim2.new(1, -20, 0, 27)
-	search.Position = UDim2.fromOffset(10, 8)
+	search.Position = UDim2.fromOffset(10, 7)
 	search.PlaceholderText = "Search egg type..."
 	search.Text = ""
 	search.TextColor3 = Color3.new(1, 1, 1)
@@ -1136,61 +1436,101 @@ local function makeEggSelector()
 	search.TextSize = 11
 	search.Parent = row
 
-	Instance.new("UICorner", search).CornerRadius = UDim.new(0, 6)
+	Instance.new("UICorner", search).CornerRadius =
+		UDim.new(0, 6)
 
-	local selected = Instance.new("TextLabel")
-	selected.Size = UDim2.new(1, -20, 0, 25)
-	selected.Position = UDim2.fromOffset(10, 40)
-	selected.BackgroundTransparency = 1
-	selected.Text = "Target: " .. state.SelectedEggTag
-	selected.TextColor3 = Color3.fromRGB(180, 200, 255)
-	selected.TextXAlignment = Enum.TextXAlignment.Left
-	selected.Font = Enum.Font.GothamMedium
-	selected.TextSize = 11
-	selected.Parent = row
+	local optionFrame = Instance.new("Frame")
+	optionFrame.Size = UDim2.new(1, -20, 0, 34)
+	optionFrame.Position = UDim2.fromOffset(10, 40)
+	optionFrame.BackgroundTransparency = 1
+	optionFrame.Parent = row
 
-	connect(search.FocusLost, function()
-		local text = string.lower(search.Text)
+	local optionLayout = Instance.new("UIListLayout")
+	optionLayout.FillDirection = Enum.FillDirection.Horizontal
+	optionLayout.Padding = UDim.new(0, 5)
+	optionLayout.Parent = optionFrame
 
-		for _, tag in ipairs(CONFIG.EggTags) do
-			if string.find(string.lower(tag), text, 1, true) then
-				state.SelectedEggTag = tag
-				selected.Text = "Target: " .. tag
-				search.Text = ""
-				return
+	for _, tag in ipairs(CONFIG.EggTags) do
+		local button = Instance.new("TextButton")
+
+		button.Size = UDim2.fromOffset(98, 27)
+		button.Text = tag:gsub("Egg", "")
+		button.TextColor3 = Color3.new(1, 1, 1)
+		button.BackgroundColor3 = CONFIG.RarityColors[tag]
+		button.BackgroundTransparency = 0.25
+		button.Font = Enum.Font.GothamBold
+		button.TextSize = 9
+		button.Parent = optionFrame
+
+		Instance.new("UICorner", button).CornerRadius =
+			UDim.new(0, 6)
+
+		button.Activated:Connect(function()
+			state.SelectedEggTag = tag
+			search.Text = tag
+			notify("Target: " .. tag)
+		end)
+	end
+
+	search:GetPropertyChangedSignal("Text"):Connect(function()
+		local filter = string.lower(search.Text)
+
+		for _, button in ipairs(optionFrame:GetChildren()) do
+			if button:IsA("TextButton") then
+				button.Visible =
+					filter == ""
+					or string.find(
+						string.lower(button.Text),
+						filter,
+						1,
+						true
+					) ~= nil
 			end
 		end
-
-		notify("No matching egg tag.", 1.5)
 	end)
 end
 
-makeRow("Fix Lag", setFixLag)
-makeRow("Full Bright", setFullBright)
+--========================================================
+-- UI CREATION
+--========================================================
 
-makeNumberRow(
+makeToggle("Fix Lag", false, setFixLag)
+uiPause()
+
+makeToggle("Full Bright", false, setFullBright)
+uiPause()
+
+makeNumberInput(
 	"Walk Speed",
 	CONFIG.WalkSpeed.Min,
 	CONFIG.WalkSpeed.Max,
 	state.WalkSpeed,
 	function(value)
 		state.WalkSpeed = value
-		applyWalk()
+
+		if state.SpeedWalk then
+			applyWalkSpeed()
+		end
 	end
 )
+uiPause()
 
-makeNumberRow(
+makeNumberInput(
 	"Jump",
 	CONFIG.Jump.Min,
 	CONFIG.Jump.Max,
 	state.Jump,
 	function(value)
 		state.Jump = value
-		applyJump()
+
+		if state.HighJump then
+			applyJump()
+		end
 	end
 )
+uiPause()
 
-makeNumberRow(
+makeNumberInput(
 	"Fly Speed",
 	CONFIG.FlySpeed.Min,
 	CONFIG.FlySpeed.Max,
@@ -1199,8 +1539,9 @@ makeNumberRow(
 		state.FlySpeed = value
 	end
 )
+uiPause()
 
-makeNumberRow(
+makeNumberInput(
 	"Auto-Farm Delay",
 	CONFIG.AutoFarmDelay.Min,
 	CONFIG.AutoFarmDelay.Max,
@@ -1209,43 +1550,47 @@ makeNumberRow(
 		state.AutoFarmDelay = value
 	end
 )
+uiPause()
 
 makeEggSelector()
+uiPause()
 
-makeRow("Speed Walk", setSpeed)
-makeRow("High Jump", setJump)
+makeToggle("Speed Walk", false, setSpeedWalk)
+uiPause()
 
-makeRow("Fly", function(enabled)
-	setFly(enabled)
-	updateFlightButtons()
+makeToggle("High Jump", false, setHighJump)
+uiPause()
+
+makeToggle("Fly", false, setFly)
+uiPause()
+
+makeToggle("Auto Catch", false, setAutoCatch)
+uiPause()
+
+makeToggle("Noclip", false, setManualNoclip)
+uiPause()
+
+makeToggle("Egg ESP", false, function(enabled)
+	setESP(enabled, false)
 end)
+uiPause()
 
-makeRow("Auto Catch", setAutoCatch)
-makeRow("Noclip", setNoclip)
-makeRow("Egg ESP", setEggESP)
-makeRow("Player ESP", setPlayerESP)
-makeRow("Anti-AFK", setAntiAFK)
+makeToggle("Player ESP", false, function(enabled)
+	setESP(enabled, true)
+end)
+uiPause()
 
---//====================================================
---// DRAGGING
---//====================================================
+makeToggle("Anti-AFK", false, setAntiAFK)
+
+--========================================================
+-- DRAGGING
+--========================================================
 
 local dragging = false
 local dragStart = Vector2.zero
 local startPosition = main.Position
 
-local function updateDrag(input: InputObject)
-	local delta = input.Position - dragStart
-
-	main.Position = UDim2.new(
-		startPosition.X.Scale,
-		startPosition.X.Offset + delta.X,
-		startPosition.Y.Scale,
-		startPosition.Y.Offset + delta.Y
-	)
-end
-
-connect(title.InputBegan, function(input)
+title.InputBegan:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1
 		or input.UserInputType == Enum.UserInputType.Touch then
 
@@ -1255,90 +1600,125 @@ connect(title.InputBegan, function(input)
 	end
 end)
 
-connect(UserInputService.InputChanged, function(input)
-	if dragging and (
-		input.UserInputType == Enum.UserInputType.MouseMovement
-		or input.UserInputType == Enum.UserInputType.Touch
-	) then
-		updateDrag(input)
+UserInputService.InputChanged:Connect(function(input)
+	if not dragging then
+		return
 	end
+
+	if input.UserInputType ~= Enum.UserInputType.MouseMovement
+		and input.UserInputType ~= Enum.UserInputType.Touch then
+		return
+	end
+
+	local delta = input.Position - dragStart
+
+	main.Position = UDim2.new(
+		startPosition.X.Scale,
+		startPosition.X.Offset + delta.X,
+		startPosition.Y.Scale,
+		startPosition.Y.Offset + delta.Y
+	)
 end)
 
-connect(UserInputService.InputEnded, function(input)
+UserInputService.InputEnded:Connect(function(input)
 	if input.UserInputType == Enum.UserInputType.MouseButton1
 		or input.UserInputType == Enum.UserInputType.Touch then
 		dragging = false
 	end
 end)
 
---//====================================================
---// MENU CONTROLS
---//====================================================
+--========================================================
+-- MENU CONTROLS
+--========================================================
 
-local collapsed = false
-
-local function toggleMenu()
-	state.MenuOpen = not state.MenuOpen
-	main.Visible = state.MenuOpen
-end
-
-connect(close.Activated, function()
-	state.MenuOpen = false
+closeButton.Activated:Connect(function()
 	main.Visible = false
+	state.MenuVisible = false
 end)
 
-connect(minimize.Activated, function()
-	collapsed = not collapsed
-	content.Visible = not collapsed
-	main.Size = collapsed
-		and UDim2.fromOffset(360, 48)
-		or UDim2.fromOffset(360, 430)
+minimizeButton.Activated:Connect(function()
+	state.Collapsed = not state.Collapsed
+	content.Visible = not state.Collapsed
+	status.Visible = not state.Collapsed
+
+	main.Size =
+		state.Collapsed
+			and UDim2.fromOffset(360, 48)
+			or UDim2.fromOffset(360, 430)
 end)
 
-connect(UserInputService.InputBegan, function(input, processed)
+UserInputService.InputBegan:Connect(function(input, processed)
 	if processed then
 		return
 	end
 
 	if input.KeyCode == CONFIG.MenuToggleKey then
-		toggleMenu()
+		state.MenuVisible = not state.MenuVisible
+		main.Visible = state.MenuVisible
 	end
 end)
 
---//====================================================
---// CLEANUP
---//====================================================
+--========================================================
+-- CLEANUP
+--========================================================
+
+local shuttingDown = false
 
 local function cleanup()
-	state.AutoCatch = false
-	state.AntiAFK = false
-	state.Fly = false
-
-	removeFlyForces()
-	clearESP()
-
-	for _, connection in ipairs(connections) do
-		if connection.Connected then
-			connection:Disconnect()
-		end
+	if shuttingDown then
+		return
 	end
 
-	for _, thread in ipairs(tasks) do
-		task.cancel(thread)
+	shuttingDown = true
+
+	state.FixLag = false
+	state.FullBright = false
+	state.SpeedWalk = false
+	state.HighJump = false
+	state.Fly = false
+	state.AutoCatch = false
+	state.Noclip = false
+	state.EggESP = false
+	state.PlayerESP = false
+	state.AntiAFK = false
+
+	cleanupFeature("FixLag")
+	cleanupFeature("AntiAFK")
+	cleanupFeature("ESP")
+	cleanupFeature("AutoCatch")
+	cleanupFeature("FlyPhysics")
+	cleanupFeature("CharacterLifecycle")
+
+	if noclipStepped then
+		noclipStepped:Disconnect()
+		noclipStepped = nil
+	end
+
+	if flyVelocity then
+		flyVelocity:Destroy()
+		flyVelocity = nil
+	end
+
+	if flyGyro then
+		flyGyro:Destroy()
+		flyGyro = nil
 	end
 
 	disableFixLag()
 	disableFullBright()
 
-	if flightGui then
-		flightGui:Destroy()
+	disconnectFeature("CharacterLifecycle")
+
+	if gui.Parent then
+		gui:Destroy()
 	end
 
-	if gui then
-		gui:Destroy()
+	if flightGui.Parent then
+		flightGui:Destroy()
 	end
 end
 
 script.Destroying:Connect(cleanup)
 
-notify("MrDon utility menu loaded.", 2)
+updateStatus()
+notify("Menu loaded; features remain dormant until enabled.")
